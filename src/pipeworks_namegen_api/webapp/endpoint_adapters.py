@@ -1,0 +1,455 @@
+"""Endpoint adapter functions for webapp HTTP dispatch.
+
+These adapters bridge route dispatch to route-domain modules while keeping
+``WebAppHandler`` focused on transport concerns.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from pipeworks_namegen_api.renderer import render_names
+from pipeworks_namegen_api.webapp.constants import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT
+from pipeworks_namegen_api.webapp.db import (
+    backup_database as _backup_database,
+)
+from pipeworks_namegen_api.webapp.db import (
+    connect_database as _connect_database,
+)
+from pipeworks_namegen_api.webapp.db import (
+    delete_package as _delete_package,
+)
+from pipeworks_namegen_api.webapp.db import (
+    export_database as _export_database,
+)
+from pipeworks_namegen_api.webapp.db import (
+    fetch_text_rows as _fetch_text_rows,
+)
+from pipeworks_namegen_api.webapp.db import (
+    get_package_table as _get_package_table,
+)
+from pipeworks_namegen_api.webapp.db import (
+    import_package_pair as _import_package_pair,
+)
+from pipeworks_namegen_api.webapp.db import (
+    list_package_tables as _list_package_tables,
+)
+from pipeworks_namegen_api.webapp.db import (
+    list_packages as _list_packages,
+)
+from pipeworks_namegen_api.webapp.db import (
+    restore_database as _restore_database,
+)
+from pipeworks_namegen_api.webapp.favorites import (
+    delete_favorite as _delete_favorite,
+)
+from pipeworks_namegen_api.webapp.favorites import (
+    export_favorites as _export_favorites,
+)
+from pipeworks_namegen_api.webapp.favorites import (
+    insert_favorites as _insert_favorites,
+)
+from pipeworks_namegen_api.webapp.favorites import (
+    list_favorites as _list_favorites,
+)
+from pipeworks_namegen_api.webapp.favorites import (
+    list_tags as _list_favorite_tags,
+)
+from pipeworks_namegen_api.webapp.favorites import (
+    update_favorite as _update_favorite,
+)
+from pipeworks_namegen_api.webapp.frontend import (
+    get_index_html,
+    get_static_binary_asset,
+    get_static_text_asset,
+)
+from pipeworks_namegen_api.webapp.generation import (
+    _coerce_bool,
+    _coerce_generation_count,
+    _coerce_optional_seed,
+    _coerce_output_format,
+    _coerce_render_style,
+    _collect_generation_source_values,
+    _get_generation_selection_stats,
+    _list_generation_syllable_options,
+    _sample_generation_values,
+    clear_generation_package_options_cache,
+    get_cached_generation_package_options,
+)
+from pipeworks_namegen_api.webapp.help_content import get_help_entries
+from pipeworks_namegen_api.webapp.http import _parse_optional_int, _parse_required_int
+from pipeworks_namegen_api.webapp.routes import browse as browse_routes
+from pipeworks_namegen_api.webapp.routes import database as database_routes
+from pipeworks_namegen_api.webapp.routes import database_admin as database_admin_routes
+from pipeworks_namegen_api.webapp.routes import favorites as favorites_routes
+from pipeworks_namegen_api.webapp.routes import generation as generation_routes
+from pipeworks_namegen_api.webapp.routes import help as help_routes
+from pipeworks_namegen_api.webapp.routes import imports as import_routes
+from pipeworks_namegen_api.webapp.routes import static as static_routes
+
+
+def get_root(handler: Any, _query: dict[str, list[str]]) -> None:
+    """Serve the single-page web UI shell with version injected."""
+    from pipeworks_namegen_api import __version__
+
+    html = get_index_html().replace(
+        ">user tools</",
+        f">user tools \u00b7 v{__version__}</",
+        1,
+    )
+    static_routes.get_root(handler, html)
+
+
+def get_static_pipe_works_fonts_css(handler: Any, _query: dict[str, list[str]]) -> None:
+    """Serve shared Pipe-Works font-face declarations."""
+    try:
+        content, content_type = get_static_text_asset("pipe-works-fonts.css")
+        static_routes.get_text_asset(handler, content=content, content_type=content_type)
+    except FileNotFoundError:
+        handler.send_error(404, "Not Found")
+
+
+def get_static_pipe_works_base_css(handler: Any, _query: dict[str, list[str]]) -> None:
+    """Serve shared Pipe-Works base design-system stylesheet."""
+    try:
+        content, content_type = get_static_text_asset("pipe-works-base.css")
+        static_routes.get_text_asset(handler, content=content, content_type=content_type)
+    except FileNotFoundError:
+        handler.send_error(404, "Not Found")
+
+
+def get_static_app_css(handler: Any, _query: dict[str, list[str]]) -> None:
+    """Serve main webapp stylesheet."""
+    try:
+        content, content_type = get_static_text_asset("app.css")
+        static_routes.get_text_asset(handler, content=content, content_type=content_type)
+    except FileNotFoundError:
+        handler.send_error(404, "Not Found")
+
+
+def get_static_app_js(handler: Any, _query: dict[str, list[str]]) -> None:
+    """Serve main webapp client-side script bundle."""
+    try:
+        content, content_type = get_static_text_asset("app.js")
+        static_routes.get_text_asset(handler, content=content, content_type=content_type)
+    except FileNotFoundError:
+        handler.send_error(404, "Not Found")
+
+
+def get_static_api_builder_preview_js(handler: Any, _query: dict[str, list[str]]) -> None:
+    """Serve the API builder preview support script."""
+    try:
+        content, content_type = get_static_text_asset("api_builder_preview.js")
+        static_routes.get_text_asset(handler, content=content, content_type=content_type)
+    except FileNotFoundError:
+        handler.send_error(404, "Not Found")
+
+
+def get_static_favorites_js(handler: Any, _query: dict[str, list[str]]) -> None:
+    """Serve the favorites tab support script."""
+    try:
+        content, content_type = get_static_text_asset("favorites.js")
+        static_routes.get_text_asset(handler, content=content, content_type=content_type)
+    except FileNotFoundError:
+        handler.send_error(404, "Not Found")
+
+
+def get_static_font(handler: Any, path: str) -> None:
+    """Serve bundled font files from the static directory."""
+    try:
+        relative_path = path.removeprefix("/static/").lstrip("/")
+        payload, content_type = get_static_binary_asset(relative_path)
+        static_routes.get_binary_asset(handler, payload=payload, content_type=content_type)
+    except FileNotFoundError:
+        handler.send_error(404, "Not Found")
+
+
+def get_health(handler: Any, _query: dict[str, list[str]]) -> None:
+    """Return a lightweight liveness response."""
+    static_routes.get_health(handler)
+
+
+def get_version(handler: Any, _query: dict[str, list[str]]) -> None:
+    """Return the package version."""
+    from pipeworks_namegen_api import __version__
+
+    handler._send_json({"version": __version__})
+
+
+def get_help(handler: Any, _query: dict[str, list[str]]) -> None:
+    """Return Help tab Q&A content."""
+    help_routes.get_help(handler, list_entries=get_help_entries)
+
+
+def get_favorites(handler: Any, query: dict[str, list[str]]) -> None:
+    """Return favorites list and metadata."""
+    favorites_routes.get_favorites(
+        handler,
+        query,
+        parse_optional_int=_parse_optional_int,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_favorites_schema,
+        list_favorites=_list_favorites,
+    )
+
+
+def get_favorite_tags(handler: Any, _query: dict[str, list[str]]) -> None:
+    """Return known favorites tags."""
+    favorites_routes.get_favorite_tags(
+        handler,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_favorites_schema,
+        list_tags=_list_favorite_tags,
+    )
+
+
+def get_favorites_export(handler: Any, _query: dict[str, list[str]]) -> None:
+    """Return export JSON for favorites."""
+    favorites_routes.get_favorites_export(
+        handler,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_favorites_schema,
+        export_favorites=_export_favorites,
+    )
+
+
+def post_favorites(handler: Any) -> None:
+    """Persist favorites entries."""
+    favorites_routes.post_favorites(
+        handler,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_favorites_schema,
+        insert_favorites=_insert_favorites,
+    )
+
+
+def post_favorites_update(handler: Any) -> None:
+    """Update favorites note or tags."""
+    favorites_routes.post_favorites_update(
+        handler,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_favorites_schema,
+        update_favorite=_update_favorite,
+    )
+
+
+def post_favorites_delete(handler: Any) -> None:
+    """Delete a favorite."""
+    favorites_routes.post_favorites_delete(
+        handler,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_favorites_schema,
+        delete_favorite=_delete_favorite,
+    )
+
+
+def post_favorites_export(handler: Any) -> None:
+    """Write favorites export to a file path."""
+    favorites_routes.post_favorites_export(
+        handler,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_favorites_schema,
+        export_favorites=_export_favorites,
+    )
+
+
+def post_favorites_import(handler: Any) -> None:
+    """Import favorites from a file path."""
+    favorites_routes.post_favorites_import(
+        handler,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_favorites_schema,
+        insert_favorites=_insert_favorites,
+    )
+
+
+def get_generation_package_options(handler: Any, _query: dict[str, list[str]]) -> None:
+    """Return package options grouped by generation class."""
+
+    def _list_generation_package_options_cached(conn: Any) -> list[dict[str, Any]]:
+        return get_cached_generation_package_options(conn, db_path=handler.db_path)
+
+    generation_routes.get_package_options(
+        handler,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_schema,
+        list_generation_package_options=_list_generation_package_options_cached,
+    )
+
+
+def get_generation_package_syllables(handler: Any, query: dict[str, list[str]]) -> None:
+    """Return available syllable options for one class/package selection."""
+    generation_routes.get_package_syllables(
+        handler,
+        query,
+        parse_required_int=_parse_required_int,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_schema,
+        list_generation_syllable_options=_list_generation_syllable_options,
+    )
+
+
+def get_generation_selection_stats(handler: Any, query: dict[str, list[str]]) -> None:
+    """Return max item and max unique counts for one selection scope."""
+    generation_routes.get_selection_stats(
+        handler,
+        query,
+        parse_required_int=_parse_required_int,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_schema,
+        get_generation_selection_stats=_get_generation_selection_stats,
+    )
+
+
+def get_database_packages(handler: Any, _query: dict[str, list[str]]) -> None:
+    """Return imported package metadata used by the Database View tab."""
+    database_routes.get_packages(
+        handler,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_schema,
+        list_packages=_list_packages,
+    )
+
+
+def get_database_package_tables(handler: Any, query: dict[str, list[str]]) -> None:
+    """Return available imported txt tables for a selected package id."""
+    database_routes.get_package_tables(
+        handler,
+        query,
+        parse_required_int=_parse_required_int,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_schema,
+        list_package_tables=_list_package_tables,
+    )
+
+
+def get_database_table_rows(handler: Any, query: dict[str, list[str]]) -> None:
+    """Return paginated rows from one imported physical txt-backed table."""
+    database_routes.get_table_rows(
+        handler,
+        query,
+        default_page_limit=DEFAULT_PAGE_LIMIT,
+        max_page_limit=MAX_PAGE_LIMIT,
+        parse_required_int=_parse_required_int,
+        parse_optional_int=_parse_optional_int,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_schema,
+        get_package_table=_get_package_table,
+        fetch_text_rows=_fetch_text_rows,
+    )
+
+
+def get_favicon(handler: Any, _query: dict[str, list[str]]) -> None:
+    """Reply to browser favicon probes without noisy 404 logs."""
+    static_routes.get_favicon(handler)
+
+
+def post_browse_directory(handler: Any) -> None:
+    """Browse a directory for *_metadata.json files."""
+    browse_routes.post_browse_directory(handler)
+
+
+def post_read_metadata(handler: Any) -> None:
+    """Read a *_metadata.json file and return its contents."""
+    browse_routes.post_read_metadata(handler)
+
+
+def post_import(handler: Any) -> None:
+    """Import one metadata+zip pair and create tables for included txt data."""
+    import_routes.post_import(
+        handler,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_schema,
+        import_package_pair=_import_package_pair,
+        on_import_success=lambda: clear_generation_package_options_cache(handler.db_path),
+    )
+
+
+def post_generate(handler: Any) -> None:
+    """Generate names from SQLite tables for one selected class scope."""
+    generation_routes.post_generate(
+        handler,
+        coerce_generation_count=_coerce_generation_count,
+        coerce_optional_seed=_coerce_optional_seed,
+        coerce_bool=_coerce_bool,
+        coerce_output_format=_coerce_output_format,
+        coerce_render_style=_coerce_render_style,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_schema,
+        collect_generation_source_values=_collect_generation_source_values,
+        sample_generation_values=_sample_generation_values,
+        render_values=render_names,
+    )
+
+
+def post_database_backup(handler: Any) -> None:
+    """Create a backup copy of the main SQLite database."""
+    database_admin_routes.post_database_backup(
+        handler,
+        backup_database=_backup_database,
+    )
+
+
+def post_database_export(handler: Any) -> None:
+    """Export the main SQLite database to a file path."""
+    database_admin_routes.post_database_export(
+        handler,
+        export_database=_export_database,
+    )
+
+
+def post_database_delete_package(handler: Any) -> None:
+    """Delete one imported package and its associated tables."""
+    database_admin_routes.post_database_delete_package(
+        handler,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_schema,
+        delete_package=_delete_package,
+        on_delete_success=lambda: clear_generation_package_options_cache(handler.db_path),
+    )
+
+
+def post_database_import(handler: Any) -> None:
+    """Restore the main SQLite database from a file path."""
+    database_admin_routes.post_database_import(
+        handler,
+        restore_database=_restore_database,
+    )
+
+
+__all__ = [
+    "get_root",
+    "get_static_pipe_works_fonts_css",
+    "get_static_pipe_works_base_css",
+    "get_static_app_css",
+    "get_static_app_js",
+    "get_static_api_builder_preview_js",
+    "get_static_favorites_js",
+    "get_static_font",
+    "get_health",
+    "get_version",
+    "get_help",
+    "get_favorites",
+    "get_favorite_tags",
+    "get_favorites_export",
+    "get_generation_package_options",
+    "get_generation_package_syllables",
+    "get_generation_selection_stats",
+    "get_database_packages",
+    "get_database_package_tables",
+    "get_database_table_rows",
+    "get_favicon",
+    "post_browse_directory",
+    "post_read_metadata",
+    "post_import",
+    "post_favorites",
+    "post_favorites_update",
+    "post_favorites_delete",
+    "post_favorites_export",
+    "post_favorites_import",
+    "post_database_backup",
+    "post_database_export",
+    "post_database_delete_package",
+    "post_database_import",
+    "post_generate",
+]

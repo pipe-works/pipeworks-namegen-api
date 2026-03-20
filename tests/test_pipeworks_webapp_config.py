@@ -1,0 +1,231 @@
+"""Tests for webapp configuration loading and runtime override behavior."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from pipeworks_namegen_api.webapp.config import (
+    DEFAULT_DB_PATH,
+    DEFAULT_FAVORITES_DB_PATH,
+    DEFAULT_HOST,
+    ServerSettings,
+    _coerce_port,
+    apply_runtime_overrides,
+    load_server_settings,
+)
+
+BIND_ALL_HOST = ".".join(["0", "0", "0", "0"])
+
+
+def test_coerce_port_handles_blank_and_none() -> None:
+    """Blank port values should be treated as auto-port (``None``)."""
+    assert _coerce_port(None) is None
+    assert _coerce_port("") is None
+    assert _coerce_port("   ") is None
+
+
+def test_coerce_port_rejects_invalid_values() -> None:
+    """Invalid textual or out-of-range ports should raise ``ValueError``."""
+    with pytest.raises(ValueError):
+        _coerce_port("abc")
+    with pytest.raises(ValueError):
+        _coerce_port("1023")
+    with pytest.raises(ValueError):
+        _coerce_port("70000")
+
+
+def test_load_server_settings_defaults_when_file_missing(tmp_path: Path) -> None:
+    """Missing config file should return default server settings."""
+    missing = tmp_path / "does-not-exist.ini"
+    settings = load_server_settings(missing)
+
+    assert settings.host == DEFAULT_HOST
+    assert settings.port is None
+    assert settings.db_path == DEFAULT_DB_PATH
+    assert settings.favorites_db_path == DEFAULT_FAVORITES_DB_PATH
+    assert settings.db_export_path is None
+    assert settings.db_backup_path is None
+    assert settings.verbose is True
+    assert settings.serve_ui is True
+
+
+def test_load_server_settings_reads_webapp_section(tmp_path: Path) -> None:
+    """INI values in ``[webapp]`` should be parsed into ``ServerSettings``."""
+    ini_path = tmp_path / "server.ini"
+    ini_path.write_text(
+        "\n".join(
+            [
+                "[webapp]",
+                f"host = {BIND_ALL_HOST}",
+                "port = 8111",
+                "db_path = ~/pipeworks/test.sqlite3",
+                "favorites_db_path = ~/pipeworks/favorites.sqlite3",
+                "db_export_path = ~/pipeworks/export.sqlite3",
+                "db_backup_path = ~/pipeworks/backup.sqlite3",
+                "verbose = false",
+                "serve_ui = false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_server_settings(ini_path)
+    assert settings.host == BIND_ALL_HOST
+    assert settings.port == 8111
+    assert settings.db_path == Path("~/pipeworks/test.sqlite3").expanduser()
+    assert settings.favorites_db_path == Path("~/pipeworks/favorites.sqlite3").expanduser()
+    assert settings.db_export_path == Path("~/pipeworks/export.sqlite3").expanduser()
+    assert settings.db_backup_path == Path("~/pipeworks/backup.sqlite3").expanduser()
+    assert settings.verbose is False
+    assert settings.serve_ui is False
+
+
+def test_load_server_settings_falls_back_to_server_section(tmp_path: Path) -> None:
+    """Legacy ``[server]`` section should still work when ``[webapp]`` is absent."""
+    ini_path = tmp_path / "server.ini"
+    ini_path.write_text(
+        "\n".join(
+            [
+                "[server]",
+                f"host = {BIND_ALL_HOST}",
+                "port = 8222",
+                "verbose = false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_server_settings(ini_path)
+    assert settings.host == BIND_ALL_HOST
+    assert settings.port == 8222
+    assert settings.verbose is False
+
+
+def test_load_server_settings_webapp_takes_precedence_over_server(tmp_path: Path) -> None:
+    """When both ``[webapp]`` and ``[server]`` exist, ``[webapp]`` wins."""
+    ini_path = tmp_path / "server.ini"
+    ini_path.write_text(
+        "\n".join(
+            [
+                "[server]",
+                "host = 10.0.0.1",
+                "port = 9000",
+                "",
+                "[webapp]",
+                "host = 10.0.0.2",
+                "port = 9001",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_server_settings(ini_path)
+    assert settings.host == "10.0.0.2"
+    assert settings.port == 9001
+
+
+def test_load_server_settings_api_only_overrides_serve_ui(tmp_path: Path) -> None:
+    """``api_only`` should force UI serving to be disabled."""
+    ini_path = tmp_path / "server.ini"
+    ini_path.write_text(
+        "\n".join(
+            [
+                "[webapp]",
+                "serve_ui = true",
+                "api_only = true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_server_settings(ini_path)
+    assert settings.serve_ui is False
+
+
+def test_load_server_settings_ignores_blank_paths(tmp_path: Path) -> None:
+    """Blank optional paths should resolve to None/defaults."""
+    ini_path = tmp_path / "server.ini"
+    ini_path.write_text(
+        "\n".join(
+            [
+                "[webapp]",
+                "db_export_path =   ",
+                "db_backup_path =",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_server_settings(ini_path)
+    assert settings.db_export_path is None
+    assert settings.db_backup_path is None
+
+
+def test_load_server_settings_ignores_ini_without_known_section(tmp_path: Path) -> None:
+    """INI files without ``[webapp]`` or ``[server]`` should fall back to defaults."""
+    ini_path = tmp_path / "no-server-section.ini"
+    ini_path.write_text("[other]\nkey = value\n", encoding="utf-8")
+    settings = load_server_settings(ini_path)
+
+    assert settings.host == DEFAULT_HOST
+    assert settings.port is None
+    assert settings.db_path == DEFAULT_DB_PATH
+    assert settings.favorites_db_path == DEFAULT_FAVORITES_DB_PATH
+    assert settings.db_export_path is None
+    assert settings.db_backup_path is None
+    assert settings.verbose is True
+
+
+def test_apply_runtime_overrides_updates_selected_fields(tmp_path: Path) -> None:
+    """CLI-style overrides should replace only the values that are provided."""
+    base = ServerSettings()
+    db_override = tmp_path / "db.sqlite3"
+    favorites_override = tmp_path / "favorites.sqlite3"
+
+    updated = apply_runtime_overrides(
+        base,
+        host="127.0.0.2",
+        port=8123,
+        db_path=db_override,
+        favorites_db_path=favorites_override,
+        db_export_path=tmp_path / "export.sqlite3",
+        db_backup_path=tmp_path / "backup.sqlite3",
+        verbose=False,
+        serve_ui=False,
+    )
+
+    assert updated.host == "127.0.0.2"
+    assert updated.port == 8123
+    assert updated.db_path == db_override
+    assert updated.favorites_db_path == favorites_override
+    assert updated.db_export_path == tmp_path / "export.sqlite3"
+    assert updated.db_backup_path == tmp_path / "backup.sqlite3"
+    assert updated.verbose is False
+    assert updated.serve_ui is False
+
+
+def test_apply_runtime_overrides_keeps_defaults_when_none() -> None:
+    """``None`` overrides should preserve existing values."""
+    base = ServerSettings(
+        host="127.0.0.1",
+        port=8010,
+        db_path=Path("x.sqlite3"),
+        favorites_db_path=Path("favorites.sqlite3"),
+        verbose=True,
+    )
+
+    updated = apply_runtime_overrides(
+        base,
+        host=None,
+        port=None,
+        db_path=None,
+        favorites_db_path=None,
+        db_export_path=None,
+        db_backup_path=None,
+        verbose=None,
+        serve_ui=None,
+    )
+
+    assert updated == base

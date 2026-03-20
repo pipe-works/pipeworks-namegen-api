@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pipeworks Name Generator</title>
+  <link rel="stylesheet" href="/static/pipe-works-fonts.css" />
+  <link rel="stylesheet" href="/static/pipe-works-base.css" />
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <header class="app-header">
+    <span class="app-header__title"><span class="app-header__icon">&#x270E;</span> Pipe-Works</span>
+    <span class="app-header__subtitle" id="app-version">user tools</span>
+    <nav class="tabs">
+      <button type="button" class="tab active" data-tab="generation">Generation</button>
+      <button type="button" class="tab" data-tab="database">Database View</button>
+      <button type="button" class="tab" data-tab="favorites">Favorites</button>
+      <button type="button" class="tab" data-tab="help">Help</button>
+    </nav>
+    <button type="button" id="theme-toggle" class="btn btn--secondary btn--sm theme-toggle">Light Theme</button>
+  </header>
+  <main class="app-main">
+    <section class="panel active" id="panel-generation">
+        <section class="generation-class-wrapper generation-card-full-width">
+          <div class="row-buttons">
+            <button type="button" id="generation-toggle-btn" class="btn btn--primary">Show Name Class Cards</button>
+          </div>
+          <div id="generation-class-card-section" class="generation-class-grid generation-class-grid-collapsed">
+            <article class="generation-card generation-class-card" data-class-key="first_name">
+              <h3>First Name</h3>
+              <select id="generation-package-first_name" class="select generation-package-select"></select>
+              <select id="generation-syllables-first_name" class="select generation-syllable-select"></select>
+              <button type="button" id="generation-send-first_name" class="btn btn--primary generation-send-btn">
+                Send to API Builder
+              </button>
+              <p id="generation-note-first_name" class="muted">Loading package options...</p>
+            </article>
+
+            <article class="generation-card generation-class-card" data-class-key="last_name">
+              <h3>Last Name</h3>
+              <select id="generation-package-last_name" class="select generation-package-select"></select>
+              <select id="generation-syllables-last_name" class="select generation-syllable-select"></select>
+              <button type="button" id="generation-send-last_name" class="btn btn--primary generation-send-btn">
+                Send to API Builder
+              </button>
+              <p id="generation-note-last_name" class="muted">Loading package options...</p>
+            </article>
+
+            <article class="generation-card generation-class-card" data-class-key="place_name">
+              <h3>Place Name</h3>
+              <select id="generation-package-place_name" class="select generation-package-select"></select>
+              <select id="generation-syllables-place_name" class="select generation-syllable-select"></select>
+              <button type="button" id="generation-send-place_name" class="btn btn--primary generation-send-btn">
+                Send to API Builder
+              </button>
+              <p id="generation-note-place_name" class="muted">Loading package options...</p>
+            </article>
+
+            <article class="generation-card generation-class-card" data-class-key="location_name">
+              <h3>Location Name</h3>
+              <select id="generation-package-location_name" class="select generation-package-select"></select>
+              <select id="generation-syllables-location_name" class="select generation-syllable-select"></select>
+              <button type="button" id="generation-send-location_name" class="btn btn--primary generation-send-btn">
+                Send to API Builder
+              </button>
+              <p id="generation-note-location_name" class="muted">Loading package options...</p>
+            </article>
+
+            <article class="generation-card generation-class-card" data-class-key="object_item">
+              <h3>Object Item</h3>
+              <select id="generation-package-object_item" class="select generation-package-select"></select>
+              <select id="generation-syllables-object_item" class="select generation-syllable-select"></select>
+              <button type="button" id="generation-send-object_item" class="btn btn--primary generation-send-btn">
+                Send to API Builder
+              </button>
+              <p id="generation-note-object_item" class="muted">Loading package options...</p>
+            </article>
+
+            <article class="generation-card generation-class-card" data-class-key="organisation">
+              <h3>Organisation</h3>
+              <select id="generation-package-organisation" class="select generation-package-select"></select>
+              <select id="generation-syllables-organisation" class="select generation-syllable-select"></select>
+              <button type="button" id="generation-send-organisation" class="btn btn--primary generation-send-btn">
+                Send to API Builder
+              </button>
+              <p id="generation-note-organisation" class="muted">Loading package options...</p>
+            </article>
+
+            <article class="generation-card generation-class-card" data-class-key="title_epithet">
+              <h3>Title Epithet</h3>
+              <select id="generation-package-title_epithet" class="select generation-package-select"></select>
+              <select id="generation-syllables-title_epithet" class="select generation-syllable-select"></select>
+              <button type="button" id="generation-send-title_epithet" class="btn btn--primary generation-send-btn">
+                Send to API Builder
+              </button>
+              <p id="generation-note-title_epithet" class="muted">Loading package options...</p>
+            </article>
+          </div>
+        </section>
+
+        <article class="generation-card generation-placeholder generation-card-full-width">
+          <h3>API Builder</h3>
+          <div class="api-builder-layout">
+            <section class="api-builder-left-column">
+              <section class="api-builder-pane api-builder-selection-pane">
+                <div class="api-builder-selection-header">
+                  <h4>Selected Inputs</h4>
+                  <button type="button" id="api-builder-selection-toggle-btn" class="btn btn--icon api-builder-selection-toggle-btn" title="Collapse / expand">
+                    <span id="api-builder-selection-toggle-icon" class="live-nav-icon live-nav-icon--collapse" aria-hidden="true"></span>
+                  </button>
+                </div>
+                <div id="api-builder-selection-body" class="api-builder-selection-body">
+                  <div class="api-builder-selection-table-wrap">
+                    <table class="api-builder-selection-table">
+                      <thead>
+                        <tr>
+                          <th>Class</th>
+                          <th>Package</th>
+                          <th>Syl</th>
+                          <th>Items</th>
+                          <th>Unique</th>
+                        </tr>
+                      </thead>
+                      <tbody id="api-builder-queue"></tbody>
+                    </table>
+                  </div>
+                  <div class="row-buttons">
+                    <button type="button" id="api-builder-clear-btn" class="btn btn--primary">Clear Builder</button>
+                  </div>
+                </div>
+                <p id="api-builder-combined">Combined unique combinations: 0</p>
+              </section>
+              <section class="api-builder-pane">
+                <h4>Request Parameters</h4>
+                <div class="api-builder-param-grid">
+                  <label for="api-builder-param-count">Number of Generations</label>
+                  <input
+                    id="api-builder-param-count"
+                    class="input"
+                    type="number"
+                    min="1"
+                    max="100000"
+                    value="5"
+                  />
+                </div>
+                <div class="api-builder-param-grid">
+                  <label for="api-builder-param-seed">Seed (optional)</label>
+                  <input id="api-builder-param-seed" class="input" type="number" placeholder="blank = random" />
+                </div>
+                <div class="api-builder-param-grid">
+                  <label for="api-builder-param-format">Output Format</label>
+                  <select id="api-builder-param-format" class="select">
+                    <option value="json">json</option>
+                    <option value="txt">txt</option>
+                  </select>
+                </div>
+                <div class="api-builder-checkbox-row">
+                  <input id="api-builder-param-unique" type="checkbox" />
+                  <label for="api-builder-param-unique">Unique only</label>
+                  <input id="api-builder-preview-cap-enabled" type="checkbox" checked />
+                  <label for="api-builder-preview-cap-enabled">Cap preview at 20</label>
+                </div>
+                <button type="button" id="api-builder-generate-preview-btn" class="btn btn--primary">Generate Preview</button>
+                <div class="api-builder-inline-preview-grid">
+                  <section class="api-builder-inline-preview-card">
+                    <h5>Generated Names Preview</h5>
+                    <div class="api-builder-preview-actions">
+                      <button type="button" id="api-builder-inline-fav-btn" class="btn btn--primary btn--sm api-builder-preview-copy-btn" title="Favorite all generated names">
+                        <span class="favorite-icon" aria-hidden="true"></span> Favorite All
+                      </button>
+                      <button type="button" id="api-builder-inline-copy-btn" class="btn btn--primary btn--sm api-builder-preview-copy-btn" title="Copy generated names">
+                        <span class="builder-preview-copy-icon" aria-hidden="true"></span> Copy
+                      </button>
+                      <button type="button" id="api-builder-inline-export-btn" class="btn btn--primary btn--sm api-builder-preview-copy-btn" title="Export generated names as a .txt file">
+                        <span class="builder-preview-export-icon" aria-hidden="true"></span> Export TXT
+                      </button>
+                    </div>
+                    <div id="api-builder-inline-preview" class="api-builder-preview-list muted">
+                      No preview generated yet.
+                    </div>
+                  </section>
+                  <section class="api-builder-inline-preview-card">
+                    <h5>First + Last Combinations</h5>
+                    <div class="api-builder-preview-actions">
+                      <button type="button" id="api-builder-combo-fav-btn" class="btn btn--primary btn--sm api-builder-preview-copy-btn" title="Favorite all combinations">
+                        <span class="favorite-icon" aria-hidden="true"></span> Favorite All
+                      </button>
+                      <button type="button" id="api-builder-combo-copy-btn" class="btn btn--primary btn--sm api-builder-preview-copy-btn" title="Copy combinations">
+                        <span class="builder-preview-copy-icon" aria-hidden="true"></span> Copy
+                      </button>
+                      <button type="button" id="api-builder-combo-export-btn" class="btn btn--primary btn--sm api-builder-preview-copy-btn" title="Export combinations as a .txt file">
+                        <span class="builder-preview-export-icon" aria-hidden="true"></span> Export TXT
+                      </button>
+                    </div>
+                    <div id="api-builder-combo-preview" class="api-builder-preview-list muted">
+                      No combination preview generated yet.
+                    </div>
+                  </section>
+                </div>
+                <hr class="divider" />
+                <section class="api-builder-live-preview">
+                  <div class="api-builder-live-header">
+                    <div>
+                      <h5>Live Preview</h5>
+                      <p class="muted">Click a name above to focus it here.</p>
+                    </div>
+                    <button
+                      type="button"
+                      id="api-builder-live-fav-btn"
+                      class="btn btn--primary btn--sm api-builder-preview-copy-btn"
+                    >
+                      <span class="favorite-icon" aria-hidden="true"></span>
+                      <span>Favorite</span>
+                    </button>
+                  </div>
+                  <div class="api-builder-live-controls">
+                    <div class="api-builder-live-control">
+                      <label for="preview-font-family">Font</label>
+                      <select id="preview-font-family" class="select">
+                        <option value="Crimson Text" data-fallback="serif">Crimson Text</option>
+                        <option value="Libre Baskerville" data-fallback="serif">Libre Baskerville</option>
+                        <option value="IM Fell English" data-fallback="serif">IM Fell English</option>
+                        <option value="IM Fell English SC" data-fallback="serif">IM Fell English SC</option>
+                        <option value="Special Elite" data-fallback="serif">Special Elite</option>
+                        <option value="Courier Prime" data-fallback="monospace">Courier Prime</option>
+                      </select>
+                    </div>
+                    <div class="api-builder-live-control">
+                      <label for="preview-render-style">Render</label>
+                      <select id="preview-render-style" class="select">
+                        <option value="raw" selected>Raw</option>
+                        <option value="lower">lower</option>
+                        <option value="upper">UPPER</option>
+                        <option value="title">Title</option>
+                        <option value="sentence">Sentence</option>
+                      </select>
+                    </div>
+                    <div class="api-builder-live-control">
+                      <label for="preview-font-size">Size</label>
+                      <div class="api-builder-live-range">
+                        <input id="preview-font-size" class="range-input" type="range" min="12" max="42" value="22" />
+                        <span id="preview-font-size-value">22px</span>
+                      </div>
+                    </div>
+                    <div class="api-builder-live-control">
+                      <label for="preview-font-weight">Weight</label>
+                      <div class="api-builder-live-range">
+                        <input id="preview-font-weight" class="range-input" type="range" min="300" max="900" step="100" value="500" />
+                        <span id="preview-font-weight-value">500</span>
+                      </div>
+                    </div>
+                    <div class="api-builder-live-control api-builder-live-checkbox">
+                      <label>
+                        <input id="preview-font-italic" type="checkbox" />
+                        Italic
+                      </label>
+                    </div>
+                  </div>
+                  <div id="api-builder-live-output" class="api-builder-live-output muted">
+                    No selection focused yet.
+                  </div>
+                  <div class="api-builder-live-nav">
+                    <button type="button" id="api-builder-live-prev-btn" class="btn btn--icon api-builder-live-nav-btn" title="Previous (h)" disabled>
+                      <span class="live-nav-icon live-nav-icon--prev" aria-hidden="true"></span>
+                    </button>
+                    <span id="api-builder-live-nav-pos" class="api-builder-live-nav-pos muted"></span>
+                    <button type="button" id="api-builder-live-next-btn" class="btn btn--icon api-builder-live-nav-btn" title="Next (l)" disabled>
+                      <span class="live-nav-icon live-nav-icon--next" aria-hidden="true"></span>
+                    </button>
+                  </div>
+                </section>
+              </section>
+            </section>
+            <section class="api-builder-pane api-builder-params-pane">
+              <h4>Builder Preview</h4>
+              <div class="builder-preview-section">
+                <div class="builder-preview-header">
+                  <span>cURL</span>
+                  <button type="button" id="api-builder-copy-curl-btn" class="btn btn--primary btn--sm builder-preview-copy-btn">
+                    <span class="builder-preview-copy-icon" aria-hidden="true"></span>
+                    <span>Copy</span>
+                  </button>
+                </div>
+                <pre id="api-builder-preview-curl" class="builder-preview-pre">No selections queued yet.</pre>
+              </div>
+              <div class="builder-preview-section">
+                <div class="builder-preview-header">
+                  <span>POST Payload</span>
+                  <button type="button" id="api-builder-copy-post-btn" class="btn btn--primary btn--sm builder-preview-copy-btn">
+                    <span class="builder-preview-copy-icon" aria-hidden="true"></span>
+                    <span>Copy</span>
+                  </button>
+                </div>
+                <pre id="api-builder-preview-post" class="builder-preview-pre">No selections queued yet.</pre>
+              </div>
+            </section>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel" id="panel-database">
+        <div class="db-layout">
+          <div class="db-sidebar">
+            <section class="db-card">
+              <h3>Tools</h3>
+              <div class="row-buttons">
+                <button type="button" id="db-refresh-packages" class="btn btn--primary">Refresh Packages</button>
+                <button type="button" id="db-export-btn" class="btn btn--primary">Export DB</button>
+                <button type="button" id="db-backup-btn" class="btn btn--primary">Write Backup</button>
+              </div>
+              <p class="muted">
+                Export and backup paths are configured in <code>server.ini</code>.
+              </p>
+              <p id="db-export-status" class="muted">Ready for export or backup.</p>
+            </section>
+
+            <section class="db-card">
+              <h3>Selection</h3>
+              <div class="grid db-package-grid">
+                <label for="db-package-select">Package</label>
+                <div class="db-package-row">
+                  <select id="db-package-select" class="select"></select>
+                  <button type="button" id="db-delete-package-btn" class="btn btn--secondary btn--sm" title="Delete selected package">Delete</button>
+                </div>
+              </div>
+              <div class="grid">
+                <label for="db-table-select">Table</label>
+                <select id="db-table-select" class="select"></select>
+              </div>
+              <p class="muted" id="db-status">Load packages to begin browsing.</p>
+              <div id="db-manifest-section" class="db-manifest-section hidden">
+                <h4 class="db-manifest-heading">Package Manifest</h4>
+                <table class="db-manifest-table">
+                  <tbody id="db-manifest-tbody"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="db-card">
+              <h3>Import</h3>
+              <div class="row-buttons">
+                <button type="button" id="import-browse-btn" class="btn btn--primary">Browse for Metadata...</button>
+              </div>
+              <div id="import-selected-path" class="import-selected-path muted">No metadata file selected.</div>
+              <div class="row-buttons">
+                <button type="button" id="import-btn" class="btn btn--primary" disabled>Import Package</button>
+              </div>
+              <p id="import-status" class="muted">Select a *_metadata.json file to import.</p>
+            </section>
+          </div>
+          <div class="db-main">
+            <div class="row-buttons">
+              <button type="button" id="db-prev-btn" class="btn btn--primary">Previous</button>
+              <button type="button" id="db-next-btn" class="btn btn--primary">Next</button>
+              <span id="db-page-status" class="muted">Rows 0-0</span>
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Line</th>
+                  <th>Value</th>
+                </tr>
+              </thead>
+              <tbody id="db-row-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-favorites">
+        <div class="favorites-layout">
+          <div class="favorites-sidebar">
+            <section class="favorites-card">
+              <h3>Export & Backup</h3>
+              <div class="row-buttons">
+                <button type="button" id="favorites-refresh-btn" class="btn btn--primary">Refresh Favorites</button>
+                <button type="button" id="favorites-export-btn" class="btn btn--primary">Export JSON</button>
+              </div>
+              <div class="grid favorites-path-grid">
+                <label for="favorites-export-path">Backup Path</label>
+                <input id="favorites-export-path" class="input" type="text" placeholder="/path/to/favorites_backup.json" />
+              </div>
+              <div class="row-buttons">
+                <button type="button" id="favorites-backup-btn" class="btn btn--primary">Write Backup</button>
+              </div>
+            </section>
+
+            <section class="favorites-card">
+              <h3>Import</h3>
+              <div class="grid favorites-path-grid">
+                <label for="favorites-import-path">Import JSON Path</label>
+                <input id="favorites-import-path" class="input" type="text" placeholder="/path/to/favorites_export.json" />
+              </div>
+              <div class="row-buttons">
+                <button type="button" id="favorites-import-btn" class="btn btn--primary">Import Favorites</button>
+              </div>
+            </section>
+
+            <section class="favorites-card">
+              <h3>Filters</h3>
+              <div class="grid">
+                <label for="favorites-search">Search</label>
+                <input id="favorites-search" class="input" type="text" placeholder="Search names or notes" />
+              </div>
+              <div class="grid">
+                <label for="favorites-tag-filter">Tag</label>
+                <select id="favorites-tag-filter" class="select"></select>
+              </div>
+            </section>
+          </div>
+
+          <div class="favorites-main">
+            <p id="favorites-status" class="muted">Load favorites to begin browsing.</p>
+
+            <div class="favorites-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Class</th>
+                    <th>Gender</th>
+                    <th>Package</th>
+                    <th>Tags</th>
+                    <th>Note</th>
+                    <th>Added</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="favorites-table-body"></tbody>
+              </table>
+            </div>
+
+            <div class="row-buttons favorites-pagination">
+              <button type="button" id="favorites-prev-btn" class="btn btn--primary">Previous</button>
+              <button type="button" id="favorites-next-btn" class="btn btn--primary">Next</button>
+              <span id="favorites-page-status" class="muted">Rows 0-0</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    <section class="panel" id="panel-help">
+      <h2>Help</h2>
+      <p class="muted" id="help-status">Loading help content...</p>
+      <div id="help-content" class="help-content"></div>
+    </section>
+  </main>
+  <footer class="status-bar">
+    <span id="status-text" class="status-bar__text">Ready.</span>
+  </footer>
+
+  <div id="favorites-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-backdrop" data-close="true"></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="favorites-modal-title">
+      <div class="modal-header">
+        <h3 id="favorites-modal-title">Save Favorites</h3>
+        <button type="button" id="favorites-modal-close" class="btn btn--icon icon-btn" aria-label="Close">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <p id="favorites-modal-summary" class="muted">No selections queued.</p>
+      <div id="favorites-modal-names" class="favorites-modal-names"></div>
+      <div class="grid">
+        <label for="favorites-modal-gender">Gender (optional)</label>
+        <select id="favorites-modal-gender" class="select">
+          <option value="">Unspecified</option>
+          <option value="male">Male</option>
+          <option value="female">Female</option>
+        </select>
+      </div>
+      <div class="grid">
+        <label for="favorites-modal-tags">Tags (comma-separated)</label>
+        <input id="favorites-modal-tags" class="input" type="text" placeholder="goblin, latin, flora" />
+      </div>
+      <div class="grid">
+        <label for="favorites-modal-note">Note (Markdown)</label>
+        <textarea id="favorites-modal-note" class="input" rows="4" placeholder="Optional notes..."></textarea>
+      </div>
+      <div class="row-buttons modal-actions">
+        <button type="button" id="favorites-modal-cancel" class="btn btn--secondary">Cancel</button>
+        <button type="button" id="favorites-modal-save" class="btn btn--primary">Save Favorites</button>
+      </div>
+      <input id="favorites-modal-id" type="hidden" />
+    </div>
+  </div>
+
+  <div id="import-browser-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-backdrop" data-close="true"></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="import-browser-title">
+      <div class="modal-header">
+        <h3 id="import-browser-title">Select Metadata File</h3>
+        <button type="button" id="import-browser-close" class="btn btn--icon icon-btn" aria-label="Close">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div id="import-browser-breadcrumb" class="import-browser-breadcrumb muted"></div>
+      <div id="import-browser-list" class="import-browser-list"></div>
+      <div class="row-buttons modal-actions">
+        <button type="button" id="import-browser-cancel" class="btn btn--secondary">Cancel</button>
+        <button type="button" id="import-browser-select" class="btn btn--primary" disabled>Select</button>
+      </div>
+    </div>
+  </div>
+
+    <script src="/static/app.js"></script>
+    <script src="/static/api_builder_preview.js"></script>
+    <script src="/static/favorites.js"></script>
+</body>
+</html>

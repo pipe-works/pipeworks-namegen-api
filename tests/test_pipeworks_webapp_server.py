@@ -1,0 +1,1724 @@
+"""Tests for the minimal Pipeworks webapp server and API helpers."""
+
+from __future__ import annotations
+
+import io
+import json
+import sqlite3
+import zipfile
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+import pipeworks_namegen_api.webapp.db.importer as importer_module
+import pipeworks_namegen_api.webapp.endpoint_adapters as endpoint_adapters_module
+import pipeworks_namegen_api.webapp.route_registry as route_registry_module
+import pipeworks_namegen_api.webapp.server as server_module
+from pipeworks_namegen_api.webapp.config import ServerSettings
+from pipeworks_namegen_api.webapp.db import (
+    connect_database as _connect_database,
+)
+from pipeworks_namegen_api.webapp.db import (
+    fetch_text_rows as _fetch_text_rows,
+)
+from pipeworks_namegen_api.webapp.db import (
+    get_package_table as _get_package_table,
+)
+from pipeworks_namegen_api.webapp.db import (
+    import_package_pair as _import_package_pair,
+)
+from pipeworks_namegen_api.webapp.db import (
+    initialize_schema as _initialize_schema,
+)
+from pipeworks_namegen_api.webapp.db import (
+    insert_text_rows as _insert_text_rows,
+)
+from pipeworks_namegen_api.webapp.db import (
+    list_package_tables as _list_package_tables,
+)
+from pipeworks_namegen_api.webapp.db import (
+    list_packages as _list_packages,
+)
+from pipeworks_namegen_api.webapp.db import (
+    load_metadata_json as _load_metadata_json,
+)
+from pipeworks_namegen_api.webapp.db import (
+    quote_identifier as _quote_identifier,
+)
+from pipeworks_namegen_api.webapp.db import (
+    read_txt_rows as _read_txt_rows,
+)
+from pipeworks_namegen_api.webapp.db import (
+    slugify_identifier as _slugify_identifier,
+)
+from pipeworks_namegen_api.webapp.generation import (
+    _coerce_bool,
+    _coerce_generation_count,
+    _coerce_optional_seed,
+    _coerce_output_format,
+    _coerce_render_style,
+    _collect_generation_source_values,
+    _extract_syllable_option_from_source_txt_name,
+    _get_generation_selection_stats,
+    _list_generation_package_options,
+    _list_generation_syllable_options,
+    _map_source_txt_name_to_generation_class,
+    _sample_generation_values,
+    _syllable_option_sort_key,
+)
+from pipeworks_namegen_api.webapp.http import (
+    _coerce_int,
+    _parse_optional_int,
+    _parse_required_int,
+)
+from pipeworks_namegen_api.webapp.routes import help as help_routes
+from pipeworks_namegen_api.webapp.server import (
+    WebAppHandler,
+    _port_is_available,
+    build_settings_from_args,
+    create_argument_parser,
+    create_handler_class,
+    find_available_port,
+    main,
+    parse_arguments,
+    resolve_server_port,
+    run_server,
+    start_http_server,
+)
+
+BIND_ALL_HOST = ".".join(["0", "0", "0", "0"])
+
+
+def _build_sample_package_pair(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a realistic metadata+zip test pair with two ``*.txt`` files."""
+    metadata_path = tmp_path / "goblin_flower-latin_selections_metadata.json"
+    zip_path = tmp_path / "goblin_flower-latin_selections.zip"
+
+    payload = {
+        "common_name": "Goblin Flower Latin",
+        "files_included": [
+            "nltk_first_name_2syl.txt",
+            "nltk_last_name_2syl.txt",
+            "nltk_first_name_2syl.json",
+        ],
+    }
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        archive.writestr("selections/nltk_first_name_2syl.txt", "alfa\n\nbeta\ngamma\n")
+        archive.writestr("selections/nltk_last_name_2syl.txt", "thorn\nbriar\n")
+        archive.writestr("selections/nltk_first_name_2syl.json", '{"ignored": true}')
+
+    return metadata_path, zip_path
+
+
+class _HandlerHarness:
+    """Small in-process harness for route testing without opening sockets."""
+
+    schema_ready: bool = False
+    schema_initialized_paths: set[str] = set()
+    favorites_schema_ready: bool = False
+    favorites_schema_initialized_paths: set[str] = set()
+    get_routes: dict[str, str] = route_registry_module.GET_ROUTE_METHODS
+    post_routes: dict[str, str] = route_registry_module.POST_ROUTE_METHODS
+
+    def __init__(
+        self,
+        *,
+        path: str,
+        db_path: Path,
+        body: dict[str, Any] | None = None,
+        favorites_db_path: Path | None = None,
+    ) -> None:
+        payload = b""
+        if body is not None:
+            payload = json.dumps(body).encode("utf-8")
+
+        self.path = path
+        self.db_path = db_path
+        self.favorites_db_path = favorites_db_path or (db_path.parent / "favorites.sqlite3")
+        self.verbose = False
+        self.headers = {"Content-Length": str(len(payload))}
+        self.rfile = io.BytesIO(payload)
+        self.wfile = io.BytesIO()
+        self.response_status = 0
+        self.response_headers: dict[str, str] = {}
+        self.error_status: int | None = None
+        self.error_message: str | None = None
+
+        # Bind handler methods directly so route logic executes unchanged.
+        self._ensure_schema = WebAppHandler._ensure_schema.__get__(self, WebAppHandler)
+        self._ensure_favorites_schema = WebAppHandler._ensure_favorites_schema.__get__(
+            self, WebAppHandler
+        )
+        self._send_text = WebAppHandler._send_text.__get__(self, WebAppHandler)
+        self._send_bytes = WebAppHandler._send_bytes.__get__(self, WebAppHandler)
+        self._send_json = WebAppHandler._send_json.__get__(self, WebAppHandler)
+        self._read_json_body = WebAppHandler._read_json_body.__get__(self, WebAppHandler)
+        self.do_GET = WebAppHandler.do_GET.__get__(self, WebAppHandler)
+        self.do_POST = WebAppHandler.do_POST.__get__(self, WebAppHandler)
+
+    def send_response(self, status: int) -> None:
+        """Store HTTP status code sent by handler logic."""
+        self.response_status = status
+
+    def send_header(self, name: str, value: str) -> None:
+        """Capture response headers for assertions when needed."""
+        self.response_headers[name] = value
+
+    def end_headers(self) -> None:
+        """Mirror BaseHTTPRequestHandler API; no-op for harness."""
+
+    def send_error(self, code: int, message: str | None = None) -> None:
+        """Capture error responses emitted by unknown-route handling."""
+        self.error_status = code
+        self.error_message = message
+
+    def json_body(self) -> dict[str, Any]:
+        """Decode written response body as JSON."""
+        self.wfile.seek(0)
+        payload = self.wfile.read().decode("utf-8")
+        return json.loads(payload) if payload else {}
+
+
+def test_slugify_identifier_normalizes_input() -> None:
+    """Slugify should normalize punctuation, empties, and leading digits."""
+    assert _slugify_identifier("Goblin Flower Latin", max_length=24) == "goblin_flower_latin"
+    assert _slugify_identifier("%%%###", max_length=24) == "item"
+    assert _slugify_identifier("123_name", max_length=24).startswith("n_")
+
+
+def test_quote_identifier_rejects_unsafe_name() -> None:
+    """SQL identifier quoting should reject non-identifier characters."""
+    with pytest.raises(ValueError):
+        _quote_identifier("drop table x;")
+
+
+def test_import_package_pair_populates_schema_and_rows(tmp_path: Path) -> None:
+    """Importer should create one SQLite table per listed txt file."""
+    db_path = tmp_path / "webapp.sqlite3"
+    metadata_path, zip_path = _build_sample_package_pair(tmp_path)
+
+    with _connect_database(db_path) as conn:
+        _initialize_schema(conn)
+        result = _import_package_pair(conn, metadata_path=metadata_path, zip_path=zip_path)
+
+        assert result["package_name"] == "Goblin Flower Latin"
+        assert len(result["tables"]) == 2
+
+        packages = _list_packages(conn)
+        assert len(packages) == 1
+        package_id = packages[0]["id"]
+
+        tables = _list_package_tables(conn, package_id)
+        assert len(tables) == 2
+        assert {table["source_txt_name"] for table in tables} == {
+            "nltk_first_name_2syl.txt",
+            "nltk_last_name_2syl.txt",
+        }
+
+        first_table = tables[0]
+        meta = _get_package_table(conn, int(first_table["id"]))
+        assert meta is not None
+        rows = _fetch_text_rows(conn, str(meta["table_name"]), offset=0, limit=20)
+        assert rows
+        assert all("value" in row for row in rows)
+
+
+def test_import_package_pair_rejects_duplicate_pair(tmp_path: Path) -> None:
+    """Importing the same metadata+zip pair twice should fail cleanly."""
+    db_path = tmp_path / "webapp.sqlite3"
+    metadata_path, zip_path = _build_sample_package_pair(tmp_path)
+
+    with _connect_database(db_path) as conn:
+        _initialize_schema(conn)
+        _import_package_pair(conn, metadata_path=metadata_path, zip_path=zip_path)
+
+        with pytest.raises(ValueError, match="already been imported"):
+            _import_package_pair(conn, metadata_path=metadata_path, zip_path=zip_path)
+
+
+def test_import_package_pair_rejects_invalid_files_included_type(tmp_path: Path) -> None:
+    """Metadata ``files_included`` must be list when provided."""
+    db_path = tmp_path / "webapp.sqlite3"
+    metadata_path = tmp_path / "bad_metadata.json"
+    zip_path = tmp_path / "ok.zip"
+    metadata_path.write_text(
+        json.dumps({"common_name": "Invalid", "files_included": "nltk_first_name_2syl.txt"}),
+        encoding="utf-8",
+    )
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        archive.writestr("selections/nltk_first_name_2syl.txt", "alfa\n")
+
+    with _connect_database(db_path) as conn:
+        _initialize_schema(conn)
+        with pytest.raises(ValueError, match="files_included"):
+            _import_package_pair(conn, metadata_path=metadata_path, zip_path=zip_path)
+
+
+def test_api_endpoints_import_and_browse_rows(tmp_path: Path) -> None:
+    """End-to-end API flow should import package and expose rows via routes."""
+    metadata_path, zip_path = _build_sample_package_pair(tmp_path)
+    db_path = tmp_path / "webapi.sqlite3"
+
+    health = _HandlerHarness(path="/api/health", db_path=db_path)
+    health.do_GET()
+    assert health.response_status == 200
+    assert health.json_body()["ok"] is True
+
+    importer = _HandlerHarness(
+        path="/api/import",
+        db_path=db_path,
+        body={
+            "metadata_json_path": str(metadata_path),
+            "package_zip_path": str(zip_path),
+        },
+    )
+    importer.do_POST()
+    import_payload = importer.json_body()
+    assert importer.response_status == 200
+    assert import_payload["package_name"] == "Goblin Flower Latin"
+    assert len(import_payload["tables"]) == 2
+
+    packages = _HandlerHarness(path="/api/database/packages", db_path=db_path)
+    packages.do_GET()
+    packages_payload = packages.json_body()
+    assert packages.response_status == 200
+    assert packages_payload["packages"]
+    package_id = int(packages_payload["packages"][0]["id"])
+
+    tables = _HandlerHarness(
+        path=f"/api/database/package-tables?package_id={package_id}",
+        db_path=db_path,
+    )
+    tables.do_GET()
+    tables_payload = tables.json_body()
+    assert tables.response_status == 200
+    assert tables_payload["tables"]
+    table_id = int(tables_payload["tables"][0]["id"])
+
+    rows = _HandlerHarness(
+        path=f"/api/database/table-rows?table_id={table_id}&offset=0&limit=20",
+        db_path=db_path,
+    )
+    rows.do_GET()
+    rows_payload = rows.json_body()
+    assert rows.response_status == 200
+    assert rows_payload["rows"]
+    assert rows_payload["limit"] == 20
+
+    generation_options = _HandlerHarness(path="/api/generation/package-options", db_path=db_path)
+    generation_options.do_GET()
+    options_payload = generation_options.json_body()
+    assert generation_options.response_status == 200
+    assert options_payload["name_classes"]
+    first_name_entry = next(
+        entry for entry in options_payload["name_classes"] if entry["key"] == "first_name"
+    )
+    assert first_name_entry["packages"]
+    syllables = _HandlerHarness(
+        path=f"/api/generation/package-syllables?class_key=first_name&package_id={package_id}",
+        db_path=db_path,
+    )
+    syllables.do_GET()
+    syllables_payload = syllables.json_body()
+    assert syllables.response_status == 200
+    assert syllables_payload["syllable_options"] == [{"key": "2syl", "label": "2 syllables"}]
+
+    selection_stats = _HandlerHarness(
+        path=(
+            "/api/generation/selection-stats"
+            f"?class_key=first_name&package_id={package_id}&syllable_key=2syl"
+        ),
+        db_path=db_path,
+    )
+    selection_stats.do_GET()
+    stats_payload = selection_stats.json_body()
+    assert selection_stats.response_status == 200
+    assert stats_payload["max_items"] == 3
+    assert stats_payload["max_unique_combinations"] == 3
+
+    missing = _HandlerHarness(path="/api/database/table-rows", db_path=db_path)
+    missing.do_GET()
+    missing_payload = missing.json_body()
+    assert missing.response_status == 400
+    assert "table_id" in missing_payload["error"]
+
+
+def test_create_handler_class_binds_runtime_values(tmp_path: Path) -> None:
+    """Bound handler class should reflect runtime ``verbose`` and ``db_path``."""
+    db_path = tmp_path / "bound.sqlite3"
+    bound = create_handler_class(
+        verbose=False,
+        db_path=db_path,
+        favorites_db_path=tmp_path / "favorites.sqlite3",
+        serve_ui=True,
+    )
+    assert bound.verbose is False
+    assert bound.db_path == db_path
+    assert bound.schema_ready is True
+    assert str(db_path.resolve()) in bound.schema_initialized_paths
+
+
+def test_create_handler_class_api_only_routes(tmp_path: Path) -> None:
+    """API-only handler class should omit UI/static route mappings."""
+    db_path = tmp_path / "api.sqlite3"
+    bound = create_handler_class(
+        verbose=True,
+        db_path=db_path,
+        favorites_db_path=tmp_path / "favorites.sqlite3",
+        serve_ui=False,
+    )
+
+    assert "/api/health" in bound.get_routes
+    assert "/" not in bound.get_routes
+    assert bound.post_routes == route_registry_module.POST_ROUTE_METHODS
+
+
+def test_handler_favorites_schema_guard(tmp_path: Path) -> None:
+    """Handler should initialize favorites schema once per DB path."""
+    db_path = tmp_path / "db.sqlite3"
+    favorites_path = tmp_path / "favorites.sqlite3"
+    handler = _HandlerHarness(
+        path="/api/health",
+        db_path=db_path,
+        favorites_db_path=favorites_path,
+    )
+    with _connect_database(favorites_path) as conn:
+        handler._ensure_favorites_schema(conn)
+        assert handler.favorites_schema_ready is True
+        handler._ensure_favorites_schema(conn)
+        assert handler.favorites_schema_ready is True
+
+
+def test_generation_package_options_endpoint_without_imports(tmp_path: Path) -> None:
+    """Generation options endpoint should return empty package lists before imports."""
+    db_path = tmp_path / "db.sqlite3"
+    with _connect_database(db_path) as conn:
+        _initialize_schema(conn)
+
+    harness = _HandlerHarness(path="/api/generation/package-options", db_path=db_path)
+    harness.do_GET()
+    payload = harness.json_body()
+    assert harness.response_status == 200
+    assert [entry["key"] for entry in payload["name_classes"]] == [
+        "first_name",
+        "last_name",
+        "place_name",
+        "location_name",
+        "object_item",
+        "organisation",
+        "title_epithet",
+    ]
+    assert all(not entry["packages"] for entry in payload["name_classes"])
+
+
+def test_log_message_respects_verbose_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    """Handler should only emit prefixed log messages when verbose is enabled."""
+    handler = WebAppHandler.__new__(WebAppHandler)
+    handler.client_address = ("127.0.0.1", 9001)
+    handler.verbose = False
+    WebAppHandler.log_message(handler, "x%s", "1")
+    suppressed = capsys.readouterr()
+    assert suppressed.err == ""
+
+    handler.verbose = True
+    WebAppHandler.log_message(handler, "y%s", "2")
+    emitted = capsys.readouterr()
+    assert "name-gen-web INFO:" in emitted.err
+    assert "y2" in emitted.err
+
+
+def test_read_json_body_validation_errors(tmp_path: Path) -> None:
+    """Invalid request body/header shapes should raise clear ``ValueError`` messages."""
+    harness = _HandlerHarness(path="/api/import", db_path=tmp_path / "db.sqlite3")
+
+    harness.headers = {"Content-Length": "abc"}
+    with pytest.raises(ValueError, match="Invalid Content-Length"):
+        harness._read_json_body()
+
+    harness.headers = {"Content-Length": "0"}
+    harness.rfile = io.BytesIO(b"")
+    with pytest.raises(ValueError, match="Request body is required"):
+        harness._read_json_body()
+
+    harness.headers = {"Content-Length": "1"}
+    harness.rfile = io.BytesIO(b"{")
+    with pytest.raises(ValueError, match="must be valid JSON"):
+        harness._read_json_body()
+
+    payload = json.dumps(["not", "object"]).encode("utf-8")
+    harness.headers = {"Content-Length": str(len(payload))}
+    harness.rfile = io.BytesIO(payload)
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        harness._read_json_body()
+
+
+def test_get_misc_routes_and_unknown(tmp_path: Path) -> None:
+    """Root, favicon, and unknown GET routes should return expected responses."""
+    db_path = tmp_path / "db.sqlite3"
+
+    root = _HandlerHarness(path="/", db_path=db_path)
+    root.do_GET()
+    assert root.response_status == 200
+    assert root.response_headers.get("Content-Type") == "text/html"
+    root_html = root.wfile.getvalue().decode("utf-8")
+    assert "API Builder" in root_html
+    assert "/static/app.css" in root_html
+    assert "/static/app.js" in root_html
+    assert 'id="generation-package-first_name"' in root_html
+    assert 'id="generation-syllables-first_name"' in root_html
+    assert 'id="generation-send-first_name"' in root_html
+    assert 'id="generation-package-title_epithet"' in root_html
+    assert 'id="generation-toggle-btn"' in root_html
+    assert 'id="generation-class-card-section"' in root_html
+    assert "generation-class-grid-collapsed" in root_html
+    assert 'id="api-builder-queue"' in root_html
+    assert 'id="api-builder-clear-btn"' in root_html
+    assert 'id="api-builder-combined"' in root_html
+    assert 'id="api-builder-param-count"' in root_html
+    assert 'id="api-builder-param-seed"' in root_html
+    assert 'id="api-builder-param-format"' in root_html
+    assert 'id="api-builder-param-unique"' in root_html
+    assert 'id="preview-render-style"' in root_html
+    assert 'id="api-builder-generate-preview-btn"' in root_html
+    assert 'id="api-builder-inline-preview"' in root_html
+    assert 'id="api-builder-combo-preview"' in root_html
+    assert 'id="api-builder-live-output"' in root_html
+    assert 'id="preview-font-family"' in root_html
+    assert 'id="preview-font-size"' in root_html
+    assert 'id="preview-font-weight"' in root_html
+    assert 'id="preview-font-italic"' in root_html
+    assert 'id="api-builder-copy-curl-btn"' in root_html
+    assert 'id="api-builder-copy-post-btn"' in root_html
+    assert 'id="api-builder-preview-curl"' in root_html
+    assert 'id="api-builder-preview-post"' in root_html
+    assert "/static/api_builder_preview.js" in root_html
+    assert "/static/favorites.js" in root_html
+    assert 'id="theme-toggle"' in root_html
+    assert 'id="panel-help"' in root_html
+    assert 'id="panel-favorites"' in root_html
+
+    fonts_css = _HandlerHarness(path="/static/pipe-works-fonts.css", db_path=db_path)
+    fonts_css.do_GET()
+    assert fonts_css.response_status == 200
+    assert fonts_css.response_headers.get("Content-Type") == "text/css; charset=utf-8"
+    assert "@font-face" in fonts_css.wfile.getvalue().decode("utf-8")
+
+    base_css = _HandlerHarness(path="/static/pipe-works-base.css", db_path=db_path)
+    base_css.do_GET()
+    assert base_css.response_status == 200
+    assert base_css.response_headers.get("Content-Type") == "text/css; charset=utf-8"
+    assert "--col-bg" in base_css.wfile.getvalue().decode("utf-8")
+
+    app_css = _HandlerHarness(path="/static/app.css", db_path=db_path)
+    app_css.do_GET()
+    assert app_css.response_status == 200
+    assert app_css.response_headers.get("Content-Type") == "text/css; charset=utf-8"
+    assert "body {" in app_css.wfile.getvalue().decode("utf-8")
+
+    app_js = _HandlerHarness(path="/static/app.js", db_path=db_path)
+    app_js.do_GET()
+    assert app_js.response_status == 200
+    assert app_js.response_headers.get("Content-Type") == "application/javascript; charset=utf-8"
+    assert "function setActiveTab" in app_js.wfile.getvalue().decode("utf-8")
+
+    preview_js = _HandlerHarness(path="/static/api_builder_preview.js", db_path=db_path)
+    preview_js.do_GET()
+    assert preview_js.response_status == 200
+    assert (
+        preview_js.response_headers.get("Content-Type") == "application/javascript; charset=utf-8"
+    )
+    assert "window.PipeworksPreview" in preview_js.wfile.getvalue().decode("utf-8")
+
+    favorites_js = _HandlerHarness(path="/static/favorites.js", db_path=db_path)
+    favorites_js.do_GET()
+    assert favorites_js.response_status == 200
+    assert (
+        favorites_js.response_headers.get("Content-Type") == "application/javascript; charset=utf-8"
+    )
+    assert "favoritesState" in favorites_js.wfile.getvalue().decode("utf-8")
+
+    font_asset = _HandlerHarness(path="/static/fonts/CrimsonText-Regular.woff2", db_path=db_path)
+    font_asset.do_GET()
+    assert font_asset.response_status == 200
+    assert font_asset.response_headers.get("Content-Type") == "font/woff2"
+
+    missing_font = _HandlerHarness(path="/static/fonts/missing.woff2", db_path=db_path)
+    missing_font.do_GET()
+    assert missing_font.error_status == 404
+
+    favicon = _HandlerHarness(path="/favicon.ico", db_path=db_path)
+    favicon.do_GET()
+    assert favicon.response_status == 204
+
+    unknown = _HandlerHarness(path="/does-not-exist", db_path=db_path)
+    unknown.do_GET()
+    assert unknown.error_status == 404
+
+
+def test_route_registry_contains_core_endpoints() -> None:
+    """Route registry should expose expected GET/POST dispatch entries."""
+    assert route_registry_module.GET_ROUTE_METHODS["/api/health"] == "get_health"
+    assert (
+        route_registry_module.GET_ROUTE_METHODS["/static/api_builder_preview.js"]
+        == "get_static_api_builder_preview_js"
+    )
+    assert (
+        route_registry_module.GET_ROUTE_METHODS["/static/favorites.js"] == "get_static_favorites_js"
+    )
+    assert route_registry_module.GET_ROUTE_METHODS["/api/generation/package-options"] == (
+        "get_generation_package_options"
+    )
+    assert route_registry_module.POST_ROUTE_METHODS["/api/import"] == "post_import"
+    assert (
+        route_registry_module.POST_ROUTE_METHODS["/api/database/backup"] == "post_database_backup"
+    )
+    assert (
+        route_registry_module.POST_ROUTE_METHODS["/api/database/export"] == "post_database_export"
+    )
+    assert (
+        route_registry_module.POST_ROUTE_METHODS["/api/database/import"] == "post_database_import"
+    )
+    assert route_registry_module.POST_ROUTE_METHODS["/api/generate"] == "post_generate"
+    assert "/api/health" in route_registry_module.API_GET_ROUTE_METHODS
+    assert "/" not in route_registry_module.API_GET_ROUTE_METHODS
+
+
+def test_static_text_asset_missing_returns_404(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Static text asset adapters should return 404 when assets are missing."""
+    handler = _HandlerHarness(path="/static/app.css", db_path=tmp_path / "webapp.sqlite3")
+
+    def _raise_missing(_: str) -> tuple[str, str]:
+        raise FileNotFoundError("missing")
+
+    monkeypatch.setattr(endpoint_adapters_module, "get_static_text_asset", _raise_missing)
+
+    endpoint_adapters_module.get_static_pipe_works_fonts_css(handler, {})
+    assert handler.error_status == 404
+
+    handler = _HandlerHarness(
+        path="/static/pipe-works-base.css", db_path=tmp_path / "webapp.sqlite3"
+    )
+    endpoint_adapters_module.get_static_pipe_works_base_css(handler, {})
+    assert handler.error_status == 404
+
+    handler = _HandlerHarness(path="/static/app.css", db_path=tmp_path / "webapp.sqlite3")
+    endpoint_adapters_module.get_static_app_css(handler, {})
+    assert handler.error_status == 404
+
+    handler = _HandlerHarness(path="/static/app.js", db_path=tmp_path / "webapp.sqlite3")
+    endpoint_adapters_module.get_static_app_js(handler, {})
+    assert handler.error_status == 404
+
+    handler = _HandlerHarness(
+        path="/static/api_builder_preview.js", db_path=tmp_path / "webapp.sqlite3"
+    )
+    endpoint_adapters_module.get_static_api_builder_preview_js(handler, {})
+    assert handler.error_status == 404
+
+    handler = _HandlerHarness(path="/static/favorites.js", db_path=tmp_path / "webapp.sqlite3")
+    endpoint_adapters_module.get_static_favorites_js(handler, {})
+    assert handler.error_status == 404
+
+
+def test_help_route_via_handler(tmp_path: Path) -> None:
+    """Help route should be reachable through handler dispatch."""
+    handler = _HandlerHarness(path="/api/help", db_path=tmp_path / "help.sqlite3")
+    handler.do_GET()
+    payload = handler.json_body()
+    assert handler.response_status == 200
+    assert "entries" in payload
+
+
+def test_help_route_error_path(tmp_path: Path) -> None:
+    """Help route should surface errors as a 500 JSON response."""
+    handler = _HandlerHarness(path="/api/help", db_path=tmp_path / "help.sqlite3")
+
+    def _boom() -> list[dict[str, str]]:
+        raise RuntimeError("nope")
+
+    help_routes.get_help(handler, list_entries=_boom)
+    assert handler.response_status == 500
+    assert "Failed to load help entries" in handler.json_body()["error"]
+
+
+def test_static_binary_asset_guards() -> None:
+    """Binary asset loader should reject unsafe or unsupported paths."""
+    from pipeworks_namegen_api.webapp.frontend import (
+        get_static_binary_asset,
+        get_static_text_asset,
+    )
+
+    with pytest.raises(FileNotFoundError):
+        get_static_binary_asset("/etc/passwd")
+
+    with pytest.raises(FileNotFoundError):
+        get_static_binary_asset("../templates/index.html")
+
+    with pytest.raises(FileNotFoundError):
+        get_static_binary_asset("fonts/missing.woff2")
+
+    with pytest.raises(FileNotFoundError):
+        get_static_binary_asset("fonts/OFL-Crimson_Text.txt")
+
+    with pytest.raises(FileNotFoundError):
+        get_static_text_asset("unknown.js")
+
+
+def test_schema_initialized_once_per_handler_class(tmp_path: Path) -> None:
+    """Schema fallback init should run once then reuse class-level readiness flag."""
+    db_path = tmp_path / "db.sqlite3"
+    _HandlerHarness.schema_ready = False
+    _HandlerHarness.schema_initialized_paths = set()
+
+    first = _HandlerHarness(path="/api/database/packages", db_path=db_path)
+    first.do_GET()
+    assert first.response_status == 200
+    assert _HandlerHarness.schema_ready is True
+    assert len(_HandlerHarness.schema_initialized_paths) == 1
+
+    second = _HandlerHarness(path="/api/database/packages", db_path=db_path)
+    second.do_GET()
+    assert second.response_status == 200
+    assert len(_HandlerHarness.schema_initialized_paths) == 1
+
+    # Reset for other tests that exercise initialization behavior explicitly.
+    _HandlerHarness.schema_ready = False
+    _HandlerHarness.schema_initialized_paths = set()
+
+
+def test_get_database_routes_validation_and_error_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Database and generation option GET handlers should expose runtime errors."""
+    db_path = tmp_path / "db.sqlite3"
+
+    # Validation error for package_id.
+    missing_package = _HandlerHarness(path="/api/database/package-tables", db_path=db_path)
+    missing_package.do_GET()
+    assert missing_package.response_status == 400
+    assert "package_id" in missing_package.json_body()["error"]
+
+    missing_selection_stats_class = _HandlerHarness(
+        path="/api/generation/selection-stats?package_id=1&syllable_key=2syl",
+        db_path=db_path,
+    )
+    missing_selection_stats_class.do_GET()
+    assert missing_selection_stats_class.response_status == 400
+    assert "class_key" in missing_selection_stats_class.json_body()["error"]
+
+    missing_selection_stats_syllable = _HandlerHarness(
+        path="/api/generation/selection-stats?package_id=1&class_key=first_name",
+        db_path=db_path,
+    )
+    missing_selection_stats_syllable.do_GET()
+    assert missing_selection_stats_syllable.response_status == 400
+    assert "syllable_key" in missing_selection_stats_syllable.json_body()["error"]
+
+    unknown_class = _HandlerHarness(
+        path="/api/generation/package-syllables?class_key=bad_key&package_id=1",
+        db_path=db_path,
+    )
+    unknown_class.do_GET()
+    assert unknown_class.response_status == 400
+    assert "Unsupported generation class_key" in unknown_class.json_body()["error"]
+
+    # Validation error for table_id.
+    missing_table = _HandlerHarness(path="/api/database/table-rows", db_path=db_path)
+    missing_table.do_GET()
+    assert missing_table.response_status == 400
+    assert "table_id" in missing_table.json_body()["error"]
+
+    # Validation error for class_key/package_id in syllable options route.
+    missing_class = _HandlerHarness(
+        path="/api/generation/package-syllables?package_id=1",
+        db_path=db_path,
+    )
+    missing_class.do_GET()
+    assert missing_class.response_status == 400
+    assert "class_key" in missing_class.json_body()["error"]
+
+    missing_package = _HandlerHarness(
+        path="/api/generation/package-syllables?class_key=first_name",
+        db_path=db_path,
+    )
+    missing_package.do_GET()
+    assert missing_package.response_status == 400
+    assert "package_id" in missing_package.json_body()["error"]
+
+    def boom(_db_path: Path) -> Any:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(endpoint_adapters_module, "_connect_database", boom)
+
+    packages = _HandlerHarness(path="/api/database/packages", db_path=db_path)
+    packages.do_GET()
+    assert packages.response_status == 500
+    assert "Failed to list packages" in packages.json_body()["error"]
+
+    package_tables = _HandlerHarness(
+        path="/api/database/package-tables?package_id=1",
+        db_path=db_path,
+    )
+    package_tables.do_GET()
+    assert package_tables.response_status == 500
+    assert "Failed to list package tables" in package_tables.json_body()["error"]
+
+    table_rows = _HandlerHarness(
+        path="/api/database/table-rows?table_id=1&offset=0&limit=20",
+        db_path=db_path,
+    )
+    table_rows.do_GET()
+    assert table_rows.response_status == 500
+    assert "Failed to load table rows" in table_rows.json_body()["error"]
+
+    generation_options = _HandlerHarness(path="/api/generation/package-options", db_path=db_path)
+    generation_options.do_GET()
+    assert generation_options.response_status == 500
+    assert "Failed to list generation package options" in generation_options.json_body()["error"]
+
+    generation_syllables = _HandlerHarness(
+        path="/api/generation/package-syllables?class_key=first_name&package_id=1",
+        db_path=db_path,
+    )
+    generation_syllables.do_GET()
+    assert generation_syllables.response_status == 500
+    assert "Failed to list generation syllable options" in generation_syllables.json_body()["error"]
+
+    selection_stats = _HandlerHarness(
+        path="/api/generation/selection-stats?class_key=first_name&package_id=1&syllable_key=2syl",
+        db_path=db_path,
+    )
+    selection_stats.do_GET()
+    assert selection_stats.response_status == 500
+    assert "Failed to compute generation selection stats" in selection_stats.json_body()["error"]
+
+
+def test_table_rows_not_found_returns_404(tmp_path: Path) -> None:
+    """Row endpoint should return 404 when the table id does not exist."""
+    db_path = tmp_path / "db.sqlite3"
+    with _connect_database(db_path) as conn:
+        _initialize_schema(conn)
+
+    missing = _HandlerHarness(path="/api/database/table-rows?table_id=999", db_path=db_path)
+    missing.do_GET()
+    assert missing.response_status == 404
+    assert "not found" in missing.json_body()["error"]
+
+
+def test_post_generate_and_unknown_routes(tmp_path: Path) -> None:
+    """POST dispatcher should route SQLite generation and unknown paths correctly."""
+    db_path = tmp_path / "db.sqlite3"
+    metadata_path, zip_path = _build_sample_package_pair(tmp_path)
+
+    importer = _HandlerHarness(
+        path="/api/import",
+        db_path=db_path,
+        body={
+            "metadata_json_path": str(metadata_path),
+            "package_zip_path": str(zip_path),
+        },
+    )
+    importer.do_POST()
+    import_payload = importer.json_body()
+    assert importer.response_status == 200
+    package_id = int(import_payload["package_id"])
+
+    gen = _HandlerHarness(
+        path="/api/generate",
+        db_path=db_path,
+        body={
+            "class_key": "first_name",
+            "package_id": package_id,
+            "syllable_key": "2syl",
+            "generation_count": 3,
+            "unique_only": True,
+            "seed": 7,
+            "output_format": "txt",
+        },
+    )
+    gen.do_POST()
+    payload = gen.json_body()
+    assert gen.response_status == 200
+    assert payload["source"] == "sqlite"
+    assert payload["class_key"] == "first_name"
+    assert payload["generation_count"] == 3
+    assert payload["unique_only"] is True
+    assert payload["output_format"] == "txt"
+    assert "text" in payload
+    assert len(payload["names"]) == 3
+    assert set(payload["names"]).issubset({"alfa", "beta", "gamma"})
+
+    gen_no_seed = _HandlerHarness(
+        path="/api/generate",
+        db_path=db_path,
+        body={
+            "class_key": "first_name",
+            "package_id": package_id,
+            "syllable_key": "2syl",
+            "generation_count": 2,
+        },
+    )
+    gen_no_seed.do_POST()
+    payload_no_seed = gen_no_seed.json_body()
+    assert gen_no_seed.response_status == 200
+    assert payload_no_seed["output_format"] == "json"
+    assert "seed" not in payload_no_seed
+    assert "text" not in payload_no_seed
+
+    unknown = _HandlerHarness(path="/api/nope", db_path=db_path, body={})
+    unknown.do_POST()
+    assert unknown.error_status == 404
+
+
+def test_generate_route_applies_render_style(tmp_path: Path) -> None:
+    """Render styles should post-process names without changing sampling rules."""
+    db_path = tmp_path / "db.sqlite3"
+    metadata_path, zip_path = _build_sample_package_pair(tmp_path)
+
+    importer = _HandlerHarness(
+        path="/api/import",
+        db_path=db_path,
+        body={
+            "metadata_json_path": str(metadata_path),
+            "package_zip_path": str(zip_path),
+        },
+    )
+    importer.do_POST()
+    package_id = int(importer.json_body()["package_id"])
+
+    gen = _HandlerHarness(
+        path="/api/generate",
+        db_path=db_path,
+        body={
+            "class_key": "first_name",
+            "package_id": package_id,
+            "syllable_key": "2syl",
+            "generation_count": 2,
+            "unique_only": True,
+            "seed": 3,
+            "render_style": "upper",
+            "output_format": "txt",
+        },
+    )
+    gen.do_POST()
+    payload = gen.json_body()
+
+    assert gen.response_status == 200
+    assert payload["render_style"] == "upper"
+    assert payload["raw_names"]
+    assert payload["names"] == [name.upper() for name in payload["raw_names"]]
+    assert payload["text"] == "\n".join(payload["names"])
+
+
+def test_handle_import_validation_and_exception_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Import route should cover payload validation and failure branches."""
+    db_path = tmp_path / "db.sqlite3"
+
+    no_body = _HandlerHarness(path="/api/import", db_path=db_path)
+    no_body.do_POST()
+    assert no_body.response_status == 400
+
+    # Missing required fields.
+    missing = _HandlerHarness(path="/api/import", db_path=db_path, body={})
+    missing.do_POST()
+    assert missing.response_status == 400
+    assert "required" in missing.json_body()["error"]
+
+    # Non-existing file paths should return 400.
+    missing_files = _HandlerHarness(
+        path="/api/import",
+        db_path=db_path,
+        body={
+            "metadata_json_path": str(tmp_path / "missing.json"),
+            "package_zip_path": str(tmp_path / "missing.zip"),
+        },
+    )
+    missing_files.do_POST()
+    assert missing_files.response_status == 400
+
+    metadata_path, zip_path = _build_sample_package_pair(tmp_path)
+
+    def fail_import(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("unexpected crash")
+
+    monkeypatch.setattr(endpoint_adapters_module, "_import_package_pair", fail_import)
+    crashing = _HandlerHarness(
+        path="/api/import",
+        db_path=db_path,
+        body={
+            "metadata_json_path": str(metadata_path),
+            "package_zip_path": str(zip_path),
+        },
+    )
+    crashing.do_POST()
+    assert crashing.response_status == 500
+    assert "Import failed" in crashing.json_body()["error"]
+
+
+def test_handle_generation_validation_paths(tmp_path: Path) -> None:
+    """Generation route should reject missing scope fields and invalid values."""
+    db_path = tmp_path / "db.sqlite3"
+
+    empty = _HandlerHarness(path="/api/generate", db_path=db_path)
+    empty.do_POST()
+    assert empty.response_status == 400
+
+    missing_scope = _HandlerHarness(path="/api/generate", db_path=db_path, body={})
+    missing_scope.do_POST()
+    assert missing_scope.response_status == 400
+    assert "class_key" in missing_scope.json_body()["error"]
+
+    invalid_count = _HandlerHarness(
+        path="/api/generate",
+        db_path=db_path,
+        body={
+            "class_key": "last_name",
+            "package_id": 1,
+            "syllable_key": "2syl",
+            "generation_count": "abc",
+        },
+    )
+    invalid_count.do_POST()
+    assert invalid_count.response_status == 400
+    assert "generation_count" in invalid_count.json_body()["error"]
+
+    missing_package = _HandlerHarness(
+        path="/api/generate",
+        db_path=db_path,
+        body={"class_key": "first_name", "syllable_key": "2syl"},
+    )
+    missing_package.do_POST()
+    assert missing_package.response_status == 400
+    assert "package_id" in missing_package.json_body()["error"]
+
+    missing_syllable = _HandlerHarness(
+        path="/api/generate",
+        db_path=db_path,
+        body={"class_key": "first_name", "package_id": 1},
+    )
+    missing_syllable.do_POST()
+    assert missing_syllable.response_status == 400
+    assert "syllable_key" in missing_syllable.json_body()["error"]
+
+    non_int_package = _HandlerHarness(
+        path="/api/generate",
+        db_path=db_path,
+        body={"class_key": "first_name", "package_id": "abc", "syllable_key": "2syl"},
+    )
+    non_int_package.do_POST()
+    assert non_int_package.response_status == 400
+    assert "must be an integer" in non_int_package.json_body()["error"]
+
+    bad_package_range = _HandlerHarness(
+        path="/api/generate",
+        db_path=db_path,
+        body={"class_key": "first_name", "package_id": 0, "syllable_key": "2syl"},
+    )
+    bad_package_range.do_POST()
+    assert bad_package_range.response_status == 400
+    assert "must be >= 1" in bad_package_range.json_body()["error"]
+
+
+def test_generate_route_handles_value_and_runtime_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Generate route should map validation/runtime failures to 400/500 responses."""
+    db_path = tmp_path / "db.sqlite3"
+    with _connect_database(db_path) as conn:
+        _initialize_schema(conn)
+
+    no_matches = _HandlerHarness(
+        path="/api/generate",
+        db_path=db_path,
+        body={"class_key": "first_name", "package_id": 1, "syllable_key": "2syl"},
+    )
+    no_matches.do_POST()
+    assert no_matches.response_status == 400
+    assert "No imported tables match" in no_matches.json_body()["error"]
+
+    def fail_collect(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(endpoint_adapters_module, "_collect_generation_source_values", fail_collect)
+    runtime_fail = _HandlerHarness(
+        path="/api/generate",
+        db_path=db_path,
+        body={"class_key": "first_name", "package_id": 1, "syllable_key": "2syl"},
+    )
+    runtime_fail.do_POST()
+    assert runtime_fail.response_status == 500
+    assert "Generation failed" in runtime_fail.json_body()["error"]
+
+
+def test_import_package_pair_other_error_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Importer helper should cover missing inputs, bad zip, and rollback branch."""
+    db_path = tmp_path / "db.sqlite3"
+    metadata_path, zip_path = _build_sample_package_pair(tmp_path)
+
+    with _connect_database(db_path) as conn:
+        _initialize_schema(conn)
+
+        with pytest.raises(FileNotFoundError, match="Metadata JSON does not exist"):
+            _import_package_pair(
+                conn,
+                metadata_path=tmp_path / "missing-metadata.json",
+                zip_path=zip_path,
+            )
+
+        with pytest.raises(FileNotFoundError, match="Package ZIP does not exist"):
+            _import_package_pair(
+                conn,
+                metadata_path=metadata_path,
+                zip_path=tmp_path / "missing.zip",
+            )
+
+        bad_zip = tmp_path / "bad.zip"
+        bad_zip.write_text("not a zip", encoding="utf-8")
+        with pytest.raises(ValueError, match="Invalid ZIP file"):
+            _import_package_pair(conn, metadata_path=metadata_path, zip_path=bad_zip)
+
+        def fail_rows(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("read fail")
+
+        monkeypatch.setattr(importer_module, "read_txt_rows", fail_rows)
+        with pytest.raises(RuntimeError, match="read fail"):
+            _import_package_pair(conn, metadata_path=metadata_path, zip_path=zip_path)
+
+
+def test_import_with_optional_files_included_missing(tmp_path: Path) -> None:
+    """Importer should accept metadata that omits ``files_included`` entirely."""
+    metadata_path = tmp_path / "meta.json"
+    zip_path = tmp_path / "pkg.zip"
+    metadata_path.write_text(json.dumps({"common_name": "No List"}), encoding="utf-8")
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        archive.writestr("selections/nltk_first_name_2syl.txt", "a\nb\n")
+
+    with _connect_database(tmp_path / "db.sqlite3") as conn:
+        _initialize_schema(conn)
+        result = _import_package_pair(conn, metadata_path=metadata_path, zip_path=zip_path)
+    assert result["tables"]
+
+
+def test_generation_class_mapping_from_source_txt_names() -> None:
+    """Source txt filename stems should map to expected generation class keys."""
+    assert _map_source_txt_name_to_generation_class("nltk_first_name_2syl.txt") == "first_name"
+    assert _map_source_txt_name_to_generation_class("nltk_last_name_all.txt") == "last_name"
+    assert _map_source_txt_name_to_generation_class("nltk_place_name_all.txt") == "place_name"
+    assert _map_source_txt_name_to_generation_class("nltk_location_name_all.txt") == "location_name"
+    assert _map_source_txt_name_to_generation_class("nltk_object_item_all.txt") == "object_item"
+    assert _map_source_txt_name_to_generation_class("nltk_organisation_all.txt") == "organisation"
+    assert _map_source_txt_name_to_generation_class("nltk_title_epithet_all.txt") == "title_epithet"
+    assert _map_source_txt_name_to_generation_class("nltk_unknown_domain.txt") is None
+
+
+def test_extract_syllable_option_from_source_txt_names() -> None:
+    """Syllable mode parser should normalize numeric and all-file naming patterns."""
+    assert _extract_syllable_option_from_source_txt_name("nltk_first_name_2syl.txt") == "2syl"
+    assert _extract_syllable_option_from_source_txt_name("nltk_first_name_3syl.txt") == "3syl"
+    assert _extract_syllable_option_from_source_txt_name("nltk_first_name_all.txt") == "all"
+    assert _extract_syllable_option_from_source_txt_name("nltk_first_name_sample.txt") is None
+
+
+def test_list_generation_package_options_grouped_by_class(tmp_path: Path) -> None:
+    """Generation options helper should return per-class package dropdown entries."""
+    metadata_path, zip_path = _build_sample_package_pair(tmp_path)
+    db_path = tmp_path / "webapp.sqlite3"
+
+    with _connect_database(db_path) as conn:
+        _initialize_schema(conn)
+        imported = _import_package_pair(conn, metadata_path=metadata_path, zip_path=zip_path)
+        package_id = int(imported["package_id"])
+        conn.execute(
+            """
+            INSERT INTO package_tables (package_id, source_txt_name, table_name, row_count)
+            VALUES (?, ?, ?, ?)
+            """,
+            (package_id, "nltk_first_name_3syl.txt", "extra_t1", 5),
+        )
+        conn.commit()
+        grouped = _list_generation_package_options(conn)
+
+    grouped_map = {entry["key"]: entry["packages"] for entry in grouped}
+    assert grouped_map["first_name"]
+    assert len(grouped_map["first_name"][0]["source_txt_names"]) >= 2
+    assert grouped_map["last_name"]
+    assert grouped_map["place_name"] == []
+    assert grouped_map["location_name"] == []
+    assert grouped_map["object_item"] == []
+    assert grouped_map["organisation"] == []
+    assert grouped_map["title_epithet"] == []
+
+
+def test_list_generation_syllable_options_for_package_class(tmp_path: Path) -> None:
+    """Per-package syllable options should be deduplicated and sorted for one class."""
+    db_path = tmp_path / "db.sqlite3"
+    with _connect_database(db_path) as conn:
+        _initialize_schema(conn)
+        imported = conn.execute(
+            """
+            INSERT INTO imported_packages (
+                package_name,
+                imported_at,
+                metadata_json_path,
+                package_zip_path
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                "Custom Package",
+                "2026-02-07T00:00:00+00:00",
+                str(tmp_path / "meta.json"),
+                str(tmp_path / "pkg.zip"),
+            ),
+        )
+        if imported.lastrowid is None:
+            raise AssertionError("Expected sqlite row id for imported package insert.")
+        package_id = int(imported.lastrowid)
+        conn.executemany(
+            """
+            INSERT INTO package_tables (package_id, source_txt_name, table_name, row_count)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (package_id, "nltk_first_name_4syl.txt", "t1", 10),
+                (package_id, "nltk_first_name_2syl.txt", "t2", 10),
+                (package_id, "nltk_first_name_all.txt", "t3", 10),
+                (package_id, "nltk_last_name_3syl.txt", "t4", 10),
+                (package_id, "nltk_first_name_2syl_alt.txt", "t5", 10),
+                (package_id, "nltk_first_name_sample.txt", "t6", 10),
+            ],
+        )
+        conn.commit()
+
+        first_name_options = _list_generation_syllable_options(
+            conn, class_key="first_name", package_id=package_id
+        )
+        last_name_options = _list_generation_syllable_options(
+            conn, class_key="last_name", package_id=package_id
+        )
+
+    assert first_name_options == [
+        {"key": "2syl", "label": "2 syllables"},
+        {"key": "4syl", "label": "4 syllables"},
+        {"key": "all", "label": "All syllables"},
+    ]
+    assert last_name_options == [{"key": "3syl", "label": "3 syllables"}]
+
+
+def test_syllable_option_sort_key_unknown_value_branch() -> None:
+    """Unknown syllable keys should fall through to tertiary sort bucket."""
+    assert _syllable_option_sort_key("banana") == (2, 9999, "banana")
+
+
+def test_list_generation_syllable_options_rejects_unknown_class(tmp_path: Path) -> None:
+    """Unknown class keys should fail with ``ValueError``."""
+    with _connect_database(tmp_path / "db.sqlite3") as conn:
+        _initialize_schema(conn)
+        with pytest.raises(ValueError, match="Unsupported generation class_key"):
+            _list_generation_syllable_options(conn, class_key="not_real", package_id=1)
+
+
+def test_get_generation_selection_stats_counts_rows_and_uniques(tmp_path: Path) -> None:
+    """Selection stats should report row totals and deduped values per filter."""
+    with _connect_database(tmp_path / "db.sqlite3") as conn:
+        _initialize_schema(conn)
+        imported = conn.execute(
+            """
+            INSERT INTO imported_packages (
+                package_name,
+                imported_at,
+                metadata_json_path,
+                package_zip_path
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                "Stats Package",
+                "2026-02-07T00:00:00+00:00",
+                str(tmp_path / "meta.json"),
+                str(tmp_path / "pkg.zip"),
+            ),
+        )
+        if imported.lastrowid is None:
+            raise AssertionError("Expected sqlite row id for imported package insert.")
+        package_id = int(imported.lastrowid)
+
+        conn.executemany(
+            """
+            INSERT INTO package_tables (package_id, source_txt_name, table_name, row_count)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (package_id, "nltk_first_name_2syl.txt", "stats_t1", 2),
+                (package_id, "nltk_first_name_2syl_alt.txt", "stats_t2", 2),
+                (package_id, "nltk_first_name_3syl.txt", "stats_t3", 1),
+            ],
+        )
+        conn.executescript("""
+            CREATE TABLE stats_t1 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                line_number INTEGER,
+                value TEXT
+            );
+            CREATE TABLE stats_t2 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                line_number INTEGER,
+                value TEXT
+            );
+            CREATE TABLE stats_t3 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                line_number INTEGER,
+                value TEXT
+            );
+            """)
+        conn.executemany(
+            "INSERT INTO stats_t1 (line_number, value) VALUES (?, ?)",
+            [(1, "alfa"), (2, "beta")],
+        )
+        conn.executemany(
+            "INSERT INTO stats_t2 (line_number, value) VALUES (?, ?)",
+            [(1, "beta"), (2, "gamma")],
+        )
+        conn.executemany(
+            "INSERT INTO stats_t3 (line_number, value) VALUES (?, ?)",
+            [(1, "delta")],
+        )
+        conn.commit()
+
+        stats_2syl = _get_generation_selection_stats(
+            conn,
+            class_key="first_name",
+            package_id=package_id,
+            syllable_key="2syl",
+        )
+        stats_3syl = _get_generation_selection_stats(
+            conn,
+            class_key="first_name",
+            package_id=package_id,
+            syllable_key="3syl",
+        )
+
+    assert stats_2syl == {"max_items": 4, "max_unique_combinations": 3}
+    assert stats_3syl == {"max_items": 1, "max_unique_combinations": 1}
+
+
+def test_get_generation_selection_stats_rejects_invalid_syllable(tmp_path: Path) -> None:
+    """Selection stats helper should reject unsupported syllable mode keys."""
+    with _connect_database(tmp_path / "db.sqlite3") as conn:
+        _initialize_schema(conn)
+        with pytest.raises(ValueError, match="Unsupported generation syllable_key"):
+            _get_generation_selection_stats(
+                conn,
+                class_key="first_name",
+                package_id=1,
+                syllable_key="banana",
+            )
+
+
+def test_metadata_and_txt_helpers_error_paths(tmp_path: Path) -> None:
+    """Metadata/txt helper functions should raise on invalid structures and bytes."""
+    not_object = tmp_path / "metadata.json"
+    not_object.write_text(json.dumps(["bad"]), encoding="utf-8")
+    with pytest.raises(ValueError, match="root must be an object"):
+        _load_metadata_json(not_object)
+
+    archive_path = tmp_path / "archive.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("valid.txt", "alpha\nbeta\n")
+        archive.writestr("bad.txt", b"\xff\xfe")
+
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        with pytest.raises(ValueError, match="missing from zip"):
+            _read_txt_rows(archive, "missing.txt")
+        with pytest.raises(ValueError, match="not valid UTF-8"):
+            _read_txt_rows(archive, "bad.txt")
+
+
+def test_insert_rows_empty_and_get_missing_meta(tmp_path: Path) -> None:
+    """Empty row inserts should no-op and table metadata should return None for unknown ids."""
+    with _connect_database(tmp_path / "db.sqlite3") as conn:
+        _initialize_schema(conn)
+        _insert_text_rows(conn, "arbitrary", [])
+        assert _get_package_table(conn, 12345) is None
+
+
+def test_integer_parsing_helpers_cover_default_and_bounds() -> None:
+    """Integer parsing helpers should enforce required/default and bound logic."""
+    assert _parse_optional_int({}, "offset", default=7, minimum=0) == 7
+
+    with pytest.raises(ValueError, match="required query parameter"):
+        _parse_required_int({}, "table_id", minimum=1)
+    with pytest.raises(ValueError, match="must be an integer"):
+        _coerce_int("x", key="limit")
+    with pytest.raises(ValueError, match=">= 1"):
+        _coerce_int("0", key="table_id", minimum=1)
+    with pytest.raises(ValueError, match="<= 5"):
+        _coerce_int("6", key="limit", maximum=5)
+
+
+def test_generation_payload_coercion_helpers_cover_bounds_and_invalids() -> None:
+    """Generation coercion helpers should validate full request parameter surface."""
+    assert _coerce_generation_count("3") == 3
+    with pytest.raises(ValueError, match=">= 1"):
+        _coerce_generation_count(0)
+    with pytest.raises(ValueError, match="<= 100000"):
+        _coerce_generation_count(100001)
+
+    assert _coerce_optional_seed(None) is None
+    assert _coerce_optional_seed("   ") is None
+    assert _coerce_optional_seed("12") == 12
+    with pytest.raises(ValueError, match="seed"):
+        _coerce_optional_seed("bad")
+
+    assert _coerce_bool(True) is True
+    assert _coerce_bool(0) is False
+    assert _coerce_bool("on") is True
+    assert _coerce_bool("off") is False
+    with pytest.raises(ValueError, match="unique_only"):
+        _coerce_bool("maybe")
+
+    assert _coerce_output_format("json") == "json"
+    assert _coerce_output_format("TXT") == "txt"
+    with pytest.raises(ValueError, match="output_format"):
+        _coerce_output_format("xml")
+
+    assert _coerce_render_style(None) == "raw"
+    assert _coerce_render_style("UPPER") == "upper"
+    with pytest.raises(ValueError, match="render_style"):
+        _coerce_render_style("sparkle")
+
+
+def test_generation_source_collection_and_sampling_helper_paths(tmp_path: Path) -> None:
+    """Generation helpers should cover no-candidate and sampling edge branches."""
+    with _connect_database(tmp_path / "db.sqlite3") as conn:
+        _initialize_schema(conn)
+        imported = conn.execute(
+            """
+            INSERT INTO imported_packages (
+                package_name, imported_at, metadata_json_path, package_zip_path
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                "Helper Package",
+                "2026-02-07T00:00:00+00:00",
+                str(tmp_path / "meta.json"),
+                str(tmp_path / "pkg.zip"),
+            ),
+        )
+        if imported.lastrowid is None:
+            raise AssertionError("Expected sqlite row id for imported package insert.")
+        package_id = int(imported.lastrowid)
+
+        conn.execute(
+            """
+            INSERT INTO package_tables (package_id, source_txt_name, table_name, row_count)
+            VALUES (?, ?, ?, ?)
+            """,
+            (package_id, "nltk_first_name_2syl.txt", "helper_t1", 2),
+        )
+        conn.execute("""
+            CREATE TABLE helper_t1 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                line_number INTEGER NOT NULL,
+                value TEXT NOT NULL
+            )
+            """)
+        # Intentionally blank/space-only values to exercise no-candidates guard.
+        conn.executemany(
+            "INSERT INTO helper_t1 (line_number, value) VALUES (?, ?)",
+            [(1, " "), (2, "")],
+        )
+        conn.commit()
+
+        with pytest.raises(ValueError, match="No candidate values found"):
+            _collect_generation_source_values(
+                conn,
+                class_key="first_name",
+                package_id=package_id,
+                syllable_key="2syl",
+            )
+
+    assert _sample_generation_values([], count=3, seed=None, unique_only=False) == []
+    assert _sample_generation_values([], count=3, seed=None, unique_only=True) == []
+
+    sampled_unique = _sample_generation_values(
+        ["alfa", "beta", "beta"], count=10, seed=7, unique_only=True
+    )
+    assert sorted(sampled_unique) == ["alfa", "beta"]
+
+
+def test_port_discovery_and_resolution_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Port helpers should cover available, unavailable, and no-free-port branches."""
+
+    class FakeSocketOK:
+        """Socket test double that allows bind calls."""
+
+        def __enter__(self) -> "FakeSocketOK":
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            return None
+
+        def setsockopt(self, *args: Any) -> None:
+            return None
+
+        def settimeout(self, *_args: Any) -> None:
+            return None
+
+        def connect_ex(self, *_args: Any) -> int:
+            return 1
+
+        def bind(self, *args: Any) -> None:
+            return None
+
+    class FakeSocketFail(FakeSocketOK):
+        """Socket test double that fails bind calls."""
+
+        def bind(self, *args: Any) -> None:
+            raise OSError("in use")
+
+    monkeypatch.setattr(server_module.socket, "socket", lambda *args: FakeSocketOK())
+    assert _port_is_available("127.0.0.1", 8123) is True
+
+    monkeypatch.setattr(server_module.socket, "socket", lambda *args: FakeSocketFail())
+    assert _port_is_available("127.0.0.1", 8123) is False
+
+    availability = {8000: False, 8001: True}
+    monkeypatch.setattr(
+        server_module,
+        "_port_is_available",
+        lambda _host, port: availability.get(port, False),
+    )
+    assert find_available_port(host="127.0.0.1", start=8000, end=8001) == 8001
+    assert resolve_server_port("127.0.0.1", 8001) == 8001
+    assert resolve_server_port("127.0.0.1", 8000) == 8001
+
+    with pytest.raises(OSError, match="Configured port 9500 is already in use."):
+        resolve_server_port("127.0.0.1", 9500)
+
+    with pytest.raises(OSError, match="No free ports"):
+        find_available_port(host="127.0.0.1", start=8100, end=8101)
+
+
+def test_server_start_run_and_main_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Server factory/runner/main entrypoints should cover success and error paths."""
+
+    class DummyHTTPServer:
+        """HTTPServer test double that records constructor args."""
+
+        def __init__(self, address: tuple[str, int], handler_class: type[Any]) -> None:
+            self.address = address
+            self.handler_class = handler_class
+
+    monkeypatch.setattr(server_module, "HTTPServer", DummyHTTPServer)
+    monkeypatch.setattr(server_module, "resolve_server_port", lambda host, port: 8123)
+
+    settings = ServerSettings(
+        host="127.0.0.1",
+        port=None,
+        db_path=tmp_path / "db.sqlite3",
+        favorites_db_path=tmp_path / "favorites.sqlite3",
+        verbose=False,
+    )
+    http_server, resolved_port = start_http_server(settings)
+    assert isinstance(http_server, DummyHTTPServer)
+    assert resolved_port == 8123
+    with sqlite3.connect(settings.db_path) as conn:
+        table_names = {str(row[0]) for row in conn.execute("""
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                """).fetchall()}
+    assert "imported_packages" in table_names
+    assert "package_tables" in table_names
+
+    class DummyRuntimeServer:
+        """Runtime server double with deterministic shutdown behavior."""
+
+        def __init__(self, *, raise_interrupt: bool) -> None:
+            self.raise_interrupt = raise_interrupt
+            self.closed = False
+
+        def serve_forever(self) -> None:
+            if self.raise_interrupt:
+                raise KeyboardInterrupt()
+
+        def server_close(self) -> None:
+            self.closed = True
+
+    runtime = DummyRuntimeServer(raise_interrupt=True)
+    monkeypatch.setattr(server_module, "start_http_server", lambda _settings: (runtime, 8124))
+    assert run_server(ServerSettings(verbose=True)) == 0
+    assert runtime.closed is True
+    assert "Serving Pipeworks Name Generator UI" in capsys.readouterr().out
+
+    parser = create_argument_parser()
+    args = parser.parse_args(["--host", BIND_ALL_HOST, "--port", "8999", "--quiet", "--api-only"])
+    assert args.host == BIND_ALL_HOST
+    assert args.port == 8999
+    assert args.quiet is True
+    assert args.api_only is True
+
+
+def test_run_server_reports_db_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verbose startup should include export/backup path information."""
+
+    class DummyRuntimeServer:
+        """Runtime server double that immediately shuts down."""
+
+        def serve_forever(self) -> None:
+            raise KeyboardInterrupt()
+
+        def server_close(self) -> None:
+            return None
+
+    runtime = DummyRuntimeServer()
+    monkeypatch.setattr(server_module, "start_http_server", lambda _settings: (runtime, 8124))
+
+    settings = ServerSettings(
+        verbose=True,
+        db_export_path=tmp_path / "export.sqlite3",
+        db_backup_path=tmp_path / "backup.sqlite3",
+    )
+    assert run_server(settings) == 0
+    output = capsys.readouterr().out
+    assert "DB export path:" in output
+    assert "DB backup path:" in output
+
+
+def test_static_asset_missing_returns_404(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing static assets should result in a 404 response."""
+    handler = _HandlerHarness(path="/static/app.js", db_path=tmp_path / "db.sqlite3")
+
+    def _raise_missing(*_args: Any, **_kwargs: Any) -> Any:
+        raise FileNotFoundError("missing asset")
+
+    monkeypatch.setattr(endpoint_adapters_module, "get_static_text_asset", _raise_missing)
+    endpoint_adapters_module.get_static_app_js(handler, {})
+    assert handler.error_status == 404
+    assert handler.error_message == "Not Found"
+
+
+def test_static_css_missing_returns_404(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing CSS assets should result in a 404 response."""
+    handler = _HandlerHarness(path="/static/app.css", db_path=tmp_path / "db.sqlite3")
+
+    def _raise_missing(*_args: Any, **_kwargs: Any) -> Any:
+        raise FileNotFoundError("missing css")
+
+    monkeypatch.setattr(endpoint_adapters_module, "get_static_text_asset", _raise_missing)
+    endpoint_adapters_module.get_static_app_css(handler, {})
+    assert handler.error_status == 404
+    assert handler.error_message == "Not Found"
+
+
+def test_static_pipe_works_fonts_css_missing_returns_404(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing pipe-works-fonts.css should result in a 404 response."""
+    handler = _HandlerHarness(path="/static/pipe-works-fonts.css", db_path=tmp_path / "db.sqlite3")
+
+    def _raise_missing(*_args: Any, **_kwargs: Any) -> Any:
+        raise FileNotFoundError("missing fonts css")
+
+    monkeypatch.setattr(endpoint_adapters_module, "get_static_text_asset", _raise_missing)
+    endpoint_adapters_module.get_static_pipe_works_fonts_css(handler, {})
+    assert handler.error_status == 404
+    assert handler.error_message == "Not Found"
+
+
+def test_static_pipe_works_base_css_missing_returns_404(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing pipe-works-base.css should result in a 404 response."""
+    handler = _HandlerHarness(path="/static/pipe-works-base.css", db_path=tmp_path / "db.sqlite3")
+
+    def _raise_missing(*_args: Any, **_kwargs: Any) -> Any:
+        raise FileNotFoundError("missing base css")
+
+    monkeypatch.setattr(endpoint_adapters_module, "get_static_text_asset", _raise_missing)
+    endpoint_adapters_module.get_static_pipe_works_base_css(handler, {})
+    assert handler.error_status == 404
+    assert handler.error_message == "Not Found"
+
+
+def test_static_api_builder_preview_missing_returns_404(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing API builder preview assets should return a 404 response."""
+    handler = _HandlerHarness(
+        path="/static/api_builder_preview.js", db_path=tmp_path / "db.sqlite3"
+    )
+
+    def _raise_missing(*_args: Any, **_kwargs: Any) -> Any:
+        raise FileNotFoundError("missing preview asset")
+
+    monkeypatch.setattr(endpoint_adapters_module, "get_static_text_asset", _raise_missing)
+    endpoint_adapters_module.get_static_api_builder_preview_js(handler, {})
+    assert handler.error_status == 404
+    assert handler.error_message == "Not Found"
+
+
+def test_static_font_missing_returns_404(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing font assets should return a 404 response."""
+    handler = _HandlerHarness(path="/static/fonts/missing.woff2", db_path=tmp_path / "db.sqlite3")
+
+    def _raise_missing(*_args: Any, **_kwargs: Any) -> Any:
+        raise FileNotFoundError("missing font")
+
+    monkeypatch.setattr(endpoint_adapters_module, "get_static_binary_asset", _raise_missing)
+    endpoint_adapters_module.get_static_font(handler, "/static/fonts/missing.woff2")
+    assert handler.error_status == 404
+    assert handler.error_message == "Not Found"
+
+
+def test_argument_parsing_and_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Argument parsing and main entrypoint should handle success and errors."""
+    parsed = parse_arguments(["--config", "server.ini"])
+    assert str(parsed.config).endswith("server.ini")
+
+    ini = tmp_path / "server.ini"
+    ini.write_text("[server]\nhost=127.0.0.1\nport=8011\nverbose=true\n", encoding="utf-8")
+    namespace = type(
+        "Args",
+        (),
+        {
+            "config": str(ini),
+            "host": BIND_ALL_HOST,
+            "port": 8012,
+            "favorites_db": None,
+            "quiet": True,
+            "api_only": True,
+        },
+    )()
+    built = build_settings_from_args(namespace)
+    assert built.host == BIND_ALL_HOST
+    assert built.port == 8012
+    assert built.verbose is False
+    assert built.serve_ui is False
+
+    settings = ServerSettings(host=BIND_ALL_HOST, port=8012, verbose=False, serve_ui=False)
+    monkeypatch.setattr(server_module, "parse_arguments", lambda _argv=None: namespace)
+    monkeypatch.setattr(server_module, "build_settings_from_args", lambda _args: settings)
+    monkeypatch.setattr(server_module, "run_server", lambda _settings: 0)
+    assert main(["--config", str(ini)]) == 0
+
+    def boom_parse(_argv: Any = None) -> Any:
+        raise RuntimeError("parse failed")
+
+    monkeypatch.setattr(server_module, "parse_arguments", boom_parse)
+    assert main([]) == 1
+    assert "Error: parse failed" in capsys.readouterr().out
