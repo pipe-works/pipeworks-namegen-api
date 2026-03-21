@@ -1,6 +1,6 @@
 project = "Pipeworks Namegen API"
 author = "Pipe-Works"
-release = "0.1.0"
+release = "0.1.1"
 
 extensions = []
 

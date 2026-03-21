@@ -1,0 +1,16 @@
+[webapp]
+# Bind to localhost and expose publicly through nginx.
+host = 127.0.0.1
+port = 8360
+
+# Production API process should be API-only.
+api_only = true
+serve_ui = false
+
+# Service-owned data paths (avoid user-home coupling).
+db_path = /var/lib/pipeworks-namegen-api/name_packages.sqlite3
+favorites_db_path = /var/lib/pipeworks-namegen-api/user_favorites.sqlite3
+db_export_path = /var/lib/pipeworks-namegen-api/exports
+db_backup_path = /var/lib/pipeworks-namegen-api/backups
+
+verbose = false
