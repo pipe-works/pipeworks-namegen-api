@@ -50,9 +50,9 @@ def get_help_entries() -> list[dict[str, str]]:
         {
             "question": "How do I move package data to a server safely?",
             "answer": (
-                "Set db_export_path in server.ini, use Database View → Export DB "
-                "to write a .sqlite3 "
-                "file locally, copy it with scp, then run "
+                "Set db_export_path in server.ini to a file path or export "
+                "directory, use Database View → Export DB to write a .sqlite3 "
+                "file, copy it with scp, then run "
                 "the restore script on the server."
             ),
             "code": (

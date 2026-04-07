@@ -36,6 +36,10 @@ Run the API-only process for production traffic:
 
 The ``server.ini`` template defaults to API-only routing.
 
+Configured database export and backup targets may be either explicit file paths
+or directory paths. When a directory path is used, the runtime writes a
+timestamped SQLite file inside that directory.
+
 systemd Baseline
 ----------------
 
@@ -76,3 +80,5 @@ Operational Notes
 2. Avoid host-specific interpreter paths in unit files; prefer managed venv
    paths under service-owned directories.
 3. Keep ingress (TLS, rate limiting, request body limits) at the reverse proxy.
+4. The service exposes both ``/api/health`` and ``/health`` for lightweight
+   liveness checks.

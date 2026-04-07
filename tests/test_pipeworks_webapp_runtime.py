@@ -159,27 +159,19 @@ def test_find_preferred_auto_port_falls_back_after_primary_exhausted() -> None:
     assert calls == [(8000, 8099), (8100, 8999)]
 
 
-def test_resolve_server_port_falls_back_when_configured_8000_port_is_busy() -> None:
-    """Configured 8000-range ports should fallback to another free auto port."""
-    availability = {8000: False, 8001: True}
+def test_resolve_server_port_raises_when_configured_port_is_busy() -> None:
+    """Configured ports should fail fast when the requested port is unavailable."""
+    availability = {8360: False}
 
     def fake_is_available(_host: str, port: int) -> bool:
         return availability.get(port, False)
 
-    def fake_find_port(host: str, start: int, end: int) -> int:
-        for candidate in range(start, end + 1):
-            if fake_is_available(host, candidate):
-                return candidate
-        raise OSError(f"No free ports available in range {start}-{end}.")
-
-    selected = resolve_server_port(
-        "127.0.0.1",
-        8000,
-        is_available=fake_is_available,
-        find_port=fake_find_port,
-    )
-
-    assert selected == 8001
+    try:
+        resolve_server_port("127.0.0.1", 8360, is_available=fake_is_available)
+    except OSError as exc:
+        assert "Configured port 8360 is already in use." in str(exc)
+    else:
+        raise AssertionError("Expected OSError for unavailable configured port.")
 
 
 def test_resolve_server_port_raises_for_busy_out_of_range_configured_port() -> None:

@@ -112,17 +112,6 @@ def resolve_server_port(
     if configured_port is not None:
         if is_available(host, configured_port):
             return configured_port
-        # For 8000-range local development workflows, treat configured ports in
-        # the auto-managed range as a preferred hint and fall back automatically.
-        if AUTO_PORT_PRIMARY_START <= configured_port <= AUTO_PORT_FALLBACK_END:
-            return find_preferred_auto_port(
-                host,
-                primary_start=AUTO_PORT_PRIMARY_START,
-                primary_end=AUTO_PORT_PRIMARY_END,
-                fallback_start=AUTO_PORT_FALLBACK_START,
-                fallback_end=AUTO_PORT_FALLBACK_END,
-                find_in_range=finder,
-            )
         raise OSError(f"Configured port {configured_port} is already in use.")
     return find_preferred_auto_port(
         host,

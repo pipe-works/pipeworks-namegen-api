@@ -10,6 +10,10 @@ serve_ui = false
 # Service-owned data paths (avoid user-home coupling).
 db_path = /var/lib/pipeworks-namegen-api/name_packages.sqlite3
 favorites_db_path = /var/lib/pipeworks-namegen-api/user_favorites.sqlite3
+
+# Export and backup paths may be either:
+# - a concrete file path
+# - or a directory path used for timestamped output files
 db_export_path = /var/lib/pipeworks-namegen-api/exports
 db_backup_path = /var/lib/pipeworks-namegen-api/backups
 
