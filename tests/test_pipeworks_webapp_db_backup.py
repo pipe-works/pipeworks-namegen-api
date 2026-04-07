@@ -103,6 +103,32 @@ def test_backup_database_creates_timestamped_copy(tmp_path: Path) -> None:
     assert result.path.name.startswith("source_backup_")
 
 
+def test_backup_database_writes_timestamped_file_inside_directory(tmp_path: Path) -> None:
+    """Backup should create a timestamped file when given a directory-like path."""
+    src_db = tmp_path / "source.sqlite3"
+    _seed_database(src_db, "Directory Backup Package")
+
+    output_dir = tmp_path / "backups"
+    result = backup_database(src_db, output_path=output_dir)
+
+    assert result.path.exists()
+    assert result.path.parent == output_dir
+    assert result.path.name.startswith("source_backup_")
+
+
+def test_export_database_writes_timestamped_file_inside_directory(tmp_path: Path) -> None:
+    """Export should create a timestamped file when given a directory-like path."""
+    src_db = tmp_path / "source.sqlite3"
+    _seed_database(src_db, "Directory Export Package")
+
+    output_dir = tmp_path / "exports"
+    result = export_database(src_db, output_path=output_dir)
+
+    assert result.path.exists()
+    assert result.path.parent == output_dir
+    assert result.path.name.startswith("source_export_")
+
+
 def test_backup_database_rejects_missing_db(tmp_path: Path) -> None:
     """Backup should reject missing source databases."""
     with pytest.raises(ValueError):
@@ -222,6 +248,26 @@ def test_database_backup_route_writes_file(tmp_path: Path) -> None:
     assert (handler.response_payload or {}).get("backup_path") == str(output_path)
 
 
+def test_database_backup_route_uses_configured_directory(tmp_path: Path) -> None:
+    """Backup route should derive a timestamped file inside a configured directory."""
+    db_path = tmp_path / "db.sqlite3"
+    _seed_database(db_path, "Configured Backup Directory Package")
+
+    output_dir = tmp_path / "backups"
+    handler = _HandlerHarness(
+        db_path=db_path,
+        body={},
+        db_backup_path=output_dir,
+    )
+    database_admin_routes.post_database_backup(handler, backup_database=backup_database)
+
+    assert handler.response_status == 200
+    backup_path = Path((handler.response_payload or {})["backup_path"])
+    assert backup_path.exists()
+    assert backup_path.parent == output_dir
+    assert backup_path.name.startswith("db_backup_")
+
+
 def test_database_export_route_uses_configured_path(tmp_path: Path) -> None:
     """Export route should use handler-configured export path when provided."""
     db_path = tmp_path / "db.sqlite3"
@@ -238,6 +284,26 @@ def test_database_export_route_uses_configured_path(tmp_path: Path) -> None:
     assert handler.response_status == 200
     assert output_path.exists()
     assert (handler.response_payload or {}).get("export_path") == str(output_path)
+
+
+def test_database_export_route_uses_configured_directory(tmp_path: Path) -> None:
+    """Export route should derive a timestamped file inside a configured directory."""
+    db_path = tmp_path / "db.sqlite3"
+    _seed_database(db_path, "Configured Export Directory Package")
+
+    output_dir = tmp_path / "exports"
+    handler = _HandlerHarness(
+        db_path=db_path,
+        body={},
+        db_export_path=output_dir,
+    )
+    database_admin_routes.post_database_export(handler, export_database=export_database)
+
+    assert handler.response_status == 200
+    export_path = Path((handler.response_payload or {})["export_path"])
+    assert export_path.exists()
+    assert export_path.parent == output_dir
+    assert export_path.name.startswith("db_export_")
 
 
 def test_database_backup_route_handles_exception(tmp_path: Path) -> None:
@@ -303,13 +369,15 @@ def test_backup_database_rejects_existing_path_without_overwrite(tmp_path: Path)
         backup_database(src_db, output_path=output_path, overwrite=False)
 
 
-def test_backup_database_rejects_directory_path(tmp_path: Path) -> None:
-    """Backup should reject directory output paths."""
+def test_backup_database_accepts_existing_directory_path(tmp_path: Path) -> None:
+    """Backup should create a timestamped file when given an existing directory."""
     src_db = tmp_path / "source.sqlite3"
     _seed_database(src_db, "Directory Backup Source")
 
-    with pytest.raises(ValueError):
-        backup_database(src_db, output_path=tmp_path)
+    result = backup_database(src_db, output_path=tmp_path)
+    assert result.path.exists()
+    assert result.path.parent == tmp_path
+    assert result.path.name.startswith("source_backup_")
 
 
 def test_backup_database_rejects_directory_source(tmp_path: Path) -> None:

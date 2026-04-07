@@ -267,6 +267,11 @@ def test_api_endpoints_import_and_browse_rows(tmp_path: Path) -> None:
     assert health.response_status == 200
     assert health.json_body()["ok"] is True
 
+    health_alias = _HandlerHarness(path="/health", db_path=db_path)
+    health_alias.do_GET()
+    assert health_alias.response_status == 200
+    assert health_alias.json_body()["ok"] is True
+
     importer = _HandlerHarness(
         path="/api/import",
         db_path=db_path,
@@ -371,6 +376,7 @@ def test_create_handler_class_api_only_routes(tmp_path: Path) -> None:
         serve_ui=False,
     )
 
+    assert "/health" in bound.get_routes
     assert "/api/health" in bound.get_routes
     assert "/" not in bound.get_routes
     assert bound.post_routes == route_registry_module.POST_ROUTE_METHODS
@@ -560,6 +566,7 @@ def test_get_misc_routes_and_unknown(tmp_path: Path) -> None:
 
 def test_route_registry_contains_core_endpoints() -> None:
     """Route registry should expose expected GET/POST dispatch entries."""
+    assert route_registry_module.GET_ROUTE_METHODS["/health"] == "get_health"
     assert route_registry_module.GET_ROUTE_METHODS["/api/health"] == "get_health"
     assert (
         route_registry_module.GET_ROUTE_METHODS["/static/api_builder_preview.js"]
@@ -582,6 +589,7 @@ def test_route_registry_contains_core_endpoints() -> None:
         route_registry_module.POST_ROUTE_METHODS["/api/database/import"] == "post_database_import"
     )
     assert route_registry_module.POST_ROUTE_METHODS["/api/generate"] == "post_generate"
+    assert "/health" in route_registry_module.API_GET_ROUTE_METHODS
     assert "/api/health" in route_registry_module.API_GET_ROUTE_METHODS
     assert "/" not in route_registry_module.API_GET_ROUTE_METHODS
 
@@ -1498,7 +1506,8 @@ def test_port_discovery_and_resolution_paths(monkeypatch: pytest.MonkeyPatch) ->
     )
     assert find_available_port(host="127.0.0.1", start=8000, end=8001) == 8001
     assert resolve_server_port("127.0.0.1", 8001) == 8001
-    assert resolve_server_port("127.0.0.1", 8000) == 8001
+    with pytest.raises(OSError, match="Configured port 8000 is already in use."):
+        resolve_server_port("127.0.0.1", 8000)
 
     with pytest.raises(OSError, match="Configured port 9500 is already in use."):
         resolve_server_port("127.0.0.1", 9500)

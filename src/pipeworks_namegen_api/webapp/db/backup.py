@@ -93,6 +93,48 @@ def _timestamped_path(base_path: Path, *, suffix: str) -> Path:
     return base_path.with_name(f"{base_path.stem}_{suffix}_{timestamp}{extension}")
 
 
+def _resolve_output_target(
+    source_path: Path,
+    output_path: Path | None,
+    *,
+    overwrite: bool,
+    label: str,
+    suffix: str,
+) -> Path:
+    """Resolve a concrete output file from an optional file or directory path.
+
+    When ``output_path`` is omitted, a timestamped sibling file is created next
+    to ``source_path``.
+
+    When ``output_path`` points to a directory, or looks directory-like because
+    it has no filename suffix, a timestamped file is created inside it using the
+    source DB filename stem plus ``suffix``.
+
+    When ``output_path`` looks like a file path, it is used as-is.
+    """
+    if output_path is None:
+        return _ensure_output_path(
+            _timestamped_path(source_path, suffix=suffix),
+            overwrite=overwrite,
+            label=label,
+        )
+
+    candidate = output_path.expanduser()
+    looks_like_directory = candidate.exists() and candidate.is_dir()
+    if not looks_like_directory and candidate.suffix == "":
+        looks_like_directory = True
+
+    if looks_like_directory:
+        candidate.mkdir(parents=True, exist_ok=True)
+        return _ensure_output_path(
+            candidate / _timestamped_path(source_path, suffix=suffix).name,
+            overwrite=overwrite,
+            label=label,
+        )
+
+    return _ensure_output_path(candidate, overwrite=overwrite, label=label)
+
+
 def _run_backup(source_path: Path, destination_path: Path) -> None:
     """Copy an SQLite database using SQLite's backup API."""
     with connect_database(source_path) as source_conn:
@@ -111,16 +153,23 @@ def backup_database(
 
     Args:
         db_path: Source SQLite database to back up.
-        output_path: Optional destination file. When omitted, a timestamped
-            sibling file is created next to ``db_path``.
+        output_path: Optional destination file or directory. When omitted, a
+            timestamped sibling file is created next to ``db_path``. When a
+            directory (or directory-like path with no suffix) is provided, a
+            timestamped file is created inside it.
         overwrite: When ``True``, allow replacing an existing file.
 
     Returns:
         ``BackupResult`` with the path and content hash of the backup.
     """
     source = _ensure_sqlite_file(db_path, label="Database")
-    target = output_path or _timestamped_path(source, suffix="backup")
-    resolved_target = _ensure_output_path(target, overwrite=overwrite, label="Backup path")
+    resolved_target = _resolve_output_target(
+        source,
+        output_path,
+        overwrite=overwrite,
+        label="Backup path",
+        suffix="backup",
+    )
 
     _run_backup(source, resolved_target)
     created_at = datetime.now(timezone.utc).isoformat()
@@ -143,7 +192,23 @@ def export_database(
     This is a convenience wrapper over :func:`backup_database` that keeps the
     naming explicit for API users.
     """
-    return backup_database(db_path, output_path=output_path, overwrite=overwrite)
+    source = _ensure_sqlite_file(db_path, label="Database")
+    resolved_target = _resolve_output_target(
+        source,
+        output_path,
+        overwrite=overwrite,
+        label="Export path",
+        suffix="export",
+    )
+
+    _run_backup(source, resolved_target)
+    created_at = datetime.now(timezone.utc).isoformat()
+    return BackupResult(
+        path=resolved_target,
+        bytes_written=resolved_target.stat().st_size,
+        sha256=_hash_file(resolved_target),
+        created_at=created_at,
+    )
 
 
 def restore_database(

@@ -15,6 +15,7 @@ GET_ROUTE_METHODS: dict[str, str] = {
     "/static/app.js": "get_static_app_js",
     "/static/api_builder_preview.js": "get_static_api_builder_preview_js",
     "/static/favorites.js": "get_static_favorites_js",
+    "/health": "get_health",
     "/api/health": "get_health",
     "/api/version": "get_version",
     "/api/generation/package-options": "get_generation_package_options",
@@ -32,7 +33,9 @@ GET_ROUTE_METHODS: dict[str, str] = {
 
 # API-only route map (no UI or static asset endpoints).
 API_GET_ROUTE_METHODS: dict[str, str] = {
-    route: handler for route, handler in GET_ROUTE_METHODS.items() if route.startswith("/api/")
+    route: handler
+    for route, handler in GET_ROUTE_METHODS.items()
+    if route == "/health" or route.startswith("/api/")
 }
 
 # Map HTTP POST path -> endpoint adapter function name.
