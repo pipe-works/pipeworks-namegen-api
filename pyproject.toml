@@ -10,7 +10,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "GNU General Public License v3.0"}
 authors = [{name = "Pipe-Works"}]
-dependencies = []
+dependencies = [
+  "pipeworks-namegen-core @ file:///srv/work/pipeworks/repos/pipeworks-namegen-core",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -46,6 +48,10 @@ addopts = "-ra"
 
 [tool.mypy]
 mypy_path = ["src"]
+
+[[tool.mypy.overrides]]
+module = "pipeworks_namegen_core.*"
+ignore_missing_imports = true
 
 [tool.bandit]
 skips = ["B101"]
