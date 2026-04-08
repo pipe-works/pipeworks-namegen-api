@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 license = {text = "GNU General Public License v3.0"}
 authors = [{name = "Pipe-Works"}]
 dependencies = [
-  "pipeworks-namegen-core @ file:///srv/work/pipeworks/repos/pipeworks-namegen-core",
+  "pipeworks-namegen-core @ git+https://github.com/pipe-works/pipeworks-namegen-core.git@475850db6d9f90342aae540802ef9e315b6929d8",
 ]
 
 [project.optional-dependencies]
