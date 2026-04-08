@@ -7,11 +7,12 @@ selection statistics, and deterministic sampling behavior used by
 
 from __future__ import annotations
 
-import random
 import re
 import sqlite3
 from pathlib import Path
 from typing import Any, Sequence
+
+from pipeworks_namegen_core import sample_values
 
 from pipeworks_namegen_api.renderer import normalize_render_style
 from pipeworks_namegen_api.webapp.constants import (
@@ -127,25 +128,8 @@ def _collect_generation_source_values(
 def _sample_generation_values(
     values: Sequence[str], *, count: int, seed: int | None, unique_only: bool
 ) -> list[str]:
-    """Sample output names from candidate values using a local RNG instance.
-
-    The RNG is per-request so seed usage never mutates global random state.
-    """
-    # Non-cryptographic sampling is intentional for deterministic API behavior.
-    rng = random.Random(seed) if seed is not None else random.Random()  # nosec B311
-    if unique_only:
-        unique_values = list(dict.fromkeys(str(value) for value in values))
-        if not unique_values:
-            return []
-        if count >= len(unique_values):
-            shuffled = unique_values[:]
-            rng.shuffle(shuffled)
-            return shuffled
-        return rng.sample(unique_values, k=count)
-
-    if not values:
-        return []
-    return [str(rng.choice(values)) for _ in range(count)]
+    """Sample output names from candidate values via core-owned pure logic."""
+    return sample_values(values, count=count, seed=seed, unique_only=unique_only)
 
 
 def _map_source_txt_name_to_generation_class(source_txt_name: str) -> str | None:
