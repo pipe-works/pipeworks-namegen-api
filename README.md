@@ -1,136 +1,170 @@
+[![CI](https://github.com/pipe-works/pipeworks-namegen-api/actions/workflows/ci.yml/badge.svg)](https://github.com/pipe-works/pipeworks-namegen-api/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/pipe-works/pipeworks-namegen-api/branch/main/graph/badge.svg)](https://codecov.io/gh/pipe-works/pipeworks-namegen-api) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0) [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/) [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+
 # pipeworks-namegen-api
 
-`pipeworks-namegen-api` is the hosted HTTP runtime for PipeWorks name
-generation. It owns the `/api/generate` service contract used by downstream
-consumers such as `pipeworks_mud_server`.
+`pipeworks-namegen-api` is the canonical HTTP runtime for PipeWorks name
+generation. It owns the `/api/generate` service contract, the packaged webapp
+runtime, and the service-side persistence for imported name packages and user
+favorites.
 
-This repo is not the right place to re-collapse the older
-`pipeworks_name_generation` all-in-one model. Keep the service boundary narrow:
+## PipeWorks Workspace
 
-1. `pipeworks-namegen-api` owns HTTP runtime behavior and deployment guidance.
-2. `pipeworks-namegen-core` owns deterministic generation primitives.
-3. `pipeworks-namegen-lexicon` owns lexicon and pipeline tooling.
+These repositories are designed to live inside a shared PipeWorks workspace
+rooted at `/srv/work/pipeworks`.
 
-## Ownership
+- `repos/` contains source checkouts only.
+- `venvs/` contains per-project virtual environments such as `pw-mud-server`.
+- `runtime/` contains mutable runtime state such as databases, exports, session
+  files, and caches.
+- `logs/` contains service-owned log output when a project writes logs outside
+  the process manager.
+- `config/` contains workspace-level configuration files that should not be
+  treated as source.
+- `bin/` contains optional workspace helper scripts.
+- `home/` is reserved for workspace-local user data when a project needs it.
+
+Across the PipeWorks ecosphere, the rule is simple: keep source in `repos/`,
+keep mutable state outside the repo checkout, and use explicit paths between
+repos when one project depends on another.
+
+## What This Repo Owns
 
 This repository is the source of truth for:
 
-1. Runtime HTTP behavior for `/api/generate` and related endpoints.
-2. API-process deployment guidance (`systemd`, nginx, runtime config, service
-   data paths).
-3. Versioned deployment templates under [`deploy/`](deploy/).
+- the runtime HTTP contract used by downstream consumers such as
+  `pipeworks_mud_server`
+- the packaged webapp server under `pipeworks_namegen_api.webapp`
+- service-owned SQLite persistence for imported packages and favorites
+- deployment templates under `deploy/`
 
 This repository does not own:
 
-1. Lexicon or corpus-pipeline tooling.
-2. A shared launcher spanning API and build-tool services.
-3. Service-owned mutable runtime data inside the repo working tree.
+- the pure deterministic generator boundary
+- corpus extraction, syllable analysis, or package authoring workflows
+- shared workspace tooling outside the API runtime boundary
 
-## Current Host Model
+## Repository Layout
 
-The current Luminal deployment model is intentionally host-managed:
+- `src/pipeworks_namegen_api/renderer.py` library-side rendering support
+- `src/pipeworks_namegen_api/webapp/` runtime server, config, routes, adapters,
+  persistence, and frontend assets
+- `tests/` pytest coverage for the API contract, runtime, config, and deploy
+  templates
+- `deploy/` example INI, systemd, and nginx files
+- `docs/` Sphinx documentation
 
-1. Repo checkout lives under `/srv/work/pipeworks/repos/pipeworks-namegen-api`.
-2. The service venv lives outside the repo under
-   `/srv/work/pipeworks/venvs/pw-namegen-api`.
-3. Host-owned config lives outside the repo at
-   `/etc/pipeworks/namegen-api/server.ini`.
-4. Service-owned writable data lives outside the repo under
-   `/var/lib/pipeworks-namegen-api`.
-5. The backend binds to `127.0.0.1:8360`.
-6. nginx is the canonical entry point at `https://namegen-api.luminal.local`.
-7. The production process target is
-   `python -m pipeworks_namegen_api.webapp.api`.
+## Relationship To The Other Namegen Repos
 
-This split is deliberate. The repo provides source code and deployment
-templates; the host owns runtime shape, trust, unit wiring, and writable state.
+- `pipeworks-namegen-core`
+  deterministic generation/rendering primitives
+- `pipeworks-namegen-api`
+  canonical runtime HTTP contract and persistence layer
+- `pipeworks-namegen-lexicon`
+  creator tooling, package authoring, and consumer-facing web surfaces
 
-## Workspace Layout
+The split matters. Runtime generation and persistence belong here; package
+creation and corpus exploration do not.
 
-For the current Luminal rollout, think in terms of five separate surfaces:
+## Quick Start
 
-1. Repo source:
-   [`/srv/work/pipeworks/repos/pipeworks-namegen-api`](.)
-2. Venv:
-   `/srv/work/pipeworks/venvs/pw-namegen-api`
-3. Host config:
-   `/etc/pipeworks/namegen-api/server.ini`
-4. Service runtime data:
-   `/var/lib/pipeworks-namegen-api`
-5. Reverse proxy and TLS:
-   nginx + `namegen-api.luminal.local`
+### Requirements
 
-Do not move runtime SQLite files, export targets, or backup targets back into
-the repo tree for convenience.
+- Python `>=3.12`
+- a PipeWorks workspace rooted at `/srv/work/pipeworks`
+- access to `pipeworks-namegen-core`, which is installed from GitHub by
+  `pyproject.toml`
 
-## Local Development
-
-Editable install:
+### Install
 
 ```bash
-PYENV_VERSION=png pip install -e ".[dev]"
+python3 -m venv /srv/work/pipeworks/venvs/pw-namegen-api
+/srv/work/pipeworks/venvs/pw-namegen-api/bin/pip install -e ".[dev]"
 ```
 
-Run the full web app locally:
+### Prepare Workspace Config
+
+The packaged webapp expects an INI file. A host-neutral workspace layout is:
 
 ```bash
-PYENV_VERSION=png python -m pipeworks_namegen_api.webapp.server --config server.ini
+mkdir -p /srv/work/pipeworks/config/pipeworks-namegen-api
+cp deploy/server.ini.example /srv/work/pipeworks/config/pipeworks-namegen-api/server.ini
 ```
 
-Run the API-only process:
+The shipped example uses service-owned writable paths. For a workspace-backed
+setup, update the INI to point at directories under `/srv/work/pipeworks/runtime/`
+such as:
+
+- `/srv/work/pipeworks/runtime/namegen-api/name_packages.sqlite3`
+- `/srv/work/pipeworks/runtime/namegen-api/user_favorites.sqlite3`
+- `/srv/work/pipeworks/runtime/namegen-api/exports`
+- `/srv/work/pipeworks/runtime/namegen-api/backups`
+
+### Run The Full Webapp
 
 ```bash
-PYENV_VERSION=png python -m pipeworks_namegen_api.webapp.api --config server.ini
+/srv/work/pipeworks/venvs/pw-namegen-api/bin/python \
+  -m pipeworks_namegen_api.webapp.server \
+  --config /srv/work/pipeworks/config/pipeworks-namegen-api/server.ini
 ```
 
-For local development, a repo-local `server.ini` is fine. For host-managed
-deployment, prefer an explicit config path outside the repo.
+### Run API-Only
 
-## Deployment Baseline
+```bash
+/srv/work/pipeworks/venvs/pw-namegen-api/bin/python \
+  -m pipeworks_namegen_api.webapp.api \
+  --config /srv/work/pipeworks/config/pipeworks-namegen-api/server.ini
+```
 
-Canonical deployment guidance and templates live in:
+## Configuration
 
-1. [`docs/source/deployment.rst`](docs/source/deployment.rst)
-2. [`deploy/systemd/pipeworks-namegen-api.service.example`](deploy/systemd/pipeworks-namegen-api.service.example)
-3. [`deploy/nginx/name.api.example.org.conf.example`](deploy/nginx/name.api.example.org.conf.example)
-4. [`deploy/server.ini.example`](deploy/server.ini.example)
+The packaged CLI accepts:
 
-The deployment templates intentionally avoid user-home paths and pyenv-coupled
-interpreter paths.
+- `--config` for the INI file path
+- `--host` and `--port` to override bind settings
+- `--favorites-db` to override the favorites SQLite path
+- `--api-only` to disable UI/static serving
+- `--quiet` to suppress verbose runtime logging
 
-## Runtime Paths
+The shipped example config lives at `deploy/server.ini.example`. The webapp
+expects a `[webapp]` section covering host, port, API-only mode, and writable
+paths for the package store, favorites DB, exports, and backups.
 
-The deployed API expects service-owned writable paths outside the repo:
+## Validation And Development
 
-1. `db_path = /var/lib/pipeworks-namegen-api/name_packages.sqlite3`
-2. `favorites_db_path = /var/lib/pipeworks-namegen-api/user_favorites.sqlite3`
-3. `db_export_path = /var/lib/pipeworks-namegen-api/exports`
-4. `db_backup_path = /var/lib/pipeworks-namegen-api/backups`
+Run the main checks from the repo root:
 
-Configured export and backup targets may be either explicit file paths or
-directory paths. When a directory path is used, the runtime writes timestamped
-output files inside that directory.
+```bash
+/srv/work/pipeworks/venvs/pw-namegen-api/bin/pytest
+/srv/work/pipeworks/venvs/pw-namegen-api/bin/ruff check src tests
+/srv/work/pipeworks/venvs/pw-namegen-api/bin/black --check src tests
+/srv/work/pipeworks/venvs/pw-namegen-api/bin/mypy src
+```
 
-## Verification Notes
+Typical smoke endpoints after startup are:
 
-The first Luminal rollout has been verified through:
+- `GET /health`
+- `GET /api/health`
+- `GET /api/version`
+- `POST /api/generate`
 
-1. `GET /health`
-2. `GET /api/health`
-3. `GET /api/version`
-4. Real `POST /api/generate` requests on both:
-   `http://127.0.0.1:8360`
-   `https://namegen-api.luminal.local`
+A successful generation request still depends on imported package data being
+present in the configured SQLite store.
 
-One practical detail matters for real generation verification: a successful
-`POST /api/generate` requires imported package data to exist in the configured
-SQLite database first.
+## Deployment Templates
 
-Another practical detail comes from the `systemd` sandboxing in the deployment
-template:
+Host-neutral deployment examples are shipped in:
 
-1. `PrivateTmp=true` means the service does not share the host's normal `/tmp`.
-2. `ProtectHome=true` means the service should not rely on reading import inputs
-   from user home directories.
-3. Import source files therefore need to live in a service-readable location
-   such as `/var/lib/pipeworks-namegen-api`.
+- `deploy/server.ini.example`
+- `deploy/systemd/pipeworks-namegen-api.service.example`
+- `deploy/nginx/name.api.example.org.conf.example`
+- `deploy/README.md`
+
+These templates are examples, not the runtime authority themselves.
+
+## Documentation
+
+Additional documentation lives in `docs/`.
+
+## License
+
+[GPL-3.0-or-later](LICENSE)
