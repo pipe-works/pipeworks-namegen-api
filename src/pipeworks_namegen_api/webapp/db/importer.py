@@ -290,9 +290,7 @@ def import_from_run_directory(
     # walker_run_state, etc.) use different schemas and must be skipped.
     ipc_files = sorted(ipc_dir.glob("*_selections.v1.json"))
     if not ipc_files:
-        raise FileNotFoundError(
-            f"No *_selections.v1.json IPC files found in: {ipc_dir}"
-        )
+        raise FileNotFoundError(f"No *_selections.v1.json IPC files found in: {ipc_dir}")
 
     resolved_package_name = (package_name or "").strip() or run_dir_resolved.name
 
@@ -317,15 +315,11 @@ def import_from_run_directory(
 
         name_class = str(params.get("name_class", "")).strip()
         if not name_class:
-            raise ValueError(
-                f"IPC file missing 'payload.params.name_class': {ipc_path.name}"
-            )
+            raise ValueError(f"IPC file missing 'payload.params.name_class': {ipc_path.name}")
 
         selected_names = payload.get("selected_names")
         if not isinstance(selected_names, list):
-            raise ValueError(
-                f"IPC file missing 'payload.selected_names' list: {ipc_path.name}"
-            )
+            raise ValueError(f"IPC file missing 'payload.selected_names' list: {ipc_path.name}")
 
         for entry in selected_names:
             if not isinstance(entry, dict):
@@ -362,16 +356,12 @@ def import_from_run_directory(
             ),
         )
         if cursor.lastrowid is None:
-            raise RuntimeError(
-                "SQLite did not return a row id for imported package insert."
-            )
+            raise RuntimeError("SQLite did not return a row id for imported package insert.")
         package_id = int(cursor.lastrowid)
 
         created_tables: list[dict[str, Any]] = []
         # Sort by name_class for deterministic table index assignment.
-        for index, (name_class, names) in enumerate(
-            sorted(names_by_class.items()), start=1
-        ):
+        for index, (name_class, names) in enumerate(sorted(names_by_class.items()), start=1):
             # source_txt_name uses the nltk_{name_class}.txt convention:
             #   _map_source_txt_name_to_generation_class  → class_key = name_class
             #   _extract_syllable_option_from_source_txt_name → None → treated as "all"
@@ -414,9 +404,7 @@ def import_from_run_directory(
 
     except sqlite3.IntegrityError as exc:
         conn.rollback()
-        raise ValueError(
-            f"Run directory '{run_dir_str}' has already been imported."
-        ) from exc
+        raise ValueError(f"Run directory '{run_dir_str}' has already been imported.") from exc
     except Exception:
         conn.rollback()
         raise
