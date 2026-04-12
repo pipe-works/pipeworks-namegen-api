@@ -41,6 +41,7 @@ API_GET_ROUTE_METHODS: dict[str, str] = {
 # Map HTTP POST path -> endpoint adapter function name.
 POST_ROUTE_METHODS: dict[str, str] = {
     "/api/import": "post_import",
+    "/api/import-from-run": "post_import_from_run",
     "/api/database/backup": "post_database_backup",
     "/api/database/export": "post_database_export",
     "/api/database/import": "post_database_import",

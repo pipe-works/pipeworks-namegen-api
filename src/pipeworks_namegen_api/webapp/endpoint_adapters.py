@@ -29,6 +29,9 @@ from pipeworks_namegen_api.webapp.db import (
     get_package_table as _get_package_table,
 )
 from pipeworks_namegen_api.webapp.db import (
+    import_from_run_directory as _import_from_run_directory,
+)
+from pipeworks_namegen_api.webapp.db import (
     import_package_pair as _import_package_pair,
 )
 from pipeworks_namegen_api.webapp.db import (
@@ -365,6 +368,17 @@ def post_import(handler: Any) -> None:
     )
 
 
+def post_import_from_run(handler: Any) -> None:
+    """Import name data from a namegen-lexicon output run directory."""
+    import_routes.post_import_from_run(
+        handler,
+        connect_database=_connect_database,
+        initialize_schema=handler._ensure_schema,
+        import_from_run_directory=_import_from_run_directory,
+        on_import_success=lambda: clear_generation_package_options_cache(handler.db_path),
+    )
+
+
 def post_generate(handler: Any) -> None:
     """Generate names from SQLite tables for one selected class scope."""
     generation_routes.post_generate(
@@ -442,6 +456,7 @@ __all__ = [
     "post_browse_directory",
     "post_read_metadata",
     "post_import",
+    "post_import_from_run",
     "post_favorites",
     "post_favorites_update",
     "post_favorites_delete",
