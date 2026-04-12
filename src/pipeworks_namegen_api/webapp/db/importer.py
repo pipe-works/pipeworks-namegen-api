@@ -234,4 +234,192 @@ def import_package_pair(
         raise
 
 
-__all__ = ["load_metadata_json", "read_txt_rows", "import_package_pair"]
+def import_from_run_directory(
+    conn: sqlite3.Connection,
+    *,
+    run_dir: Path,
+    package_name: str | None = None,
+) -> dict[str, Any]:
+    """Import name data directly from a namegen-lexicon output run directory.
+
+    Reads all IPC selection files (``ipc/*.v1.json``) from the run directory,
+    extracts ``name_class`` from each file's ``payload.params`` block, and
+    groups names by class.  One SQLite table is created per class using the
+    ``nltk_{name_class}.txt`` source filename convention so the generation
+    mapper resolves:
+
+    - ``class_key``    → ``name_class``  (e.g. ``"first_name"``)
+    - ``syllable_key`` → ``"all"``       (no syllable-count suffix in the filename)
+
+    This satisfies the mud-server ``syllable_key="all"`` requirement without
+    needing to produce a ZIP package first.
+
+    The ``UNIQUE(metadata_json_path, package_zip_path)`` constraint on
+    ``imported_packages`` naturally prevents duplicate imports: the resolved
+    run directory path is stored as ``metadata_json_path`` and the literal
+    string ``"(ipc-run-import)"`` as ``package_zip_path``.
+
+    Args:
+        conn: Open SQLite connection.
+        run_dir: Path to the namegen-lexicon output run directory (e.g.
+            ``/srv/work/pipeworks/runtime/namegen-lexicon/output/20260412_104618_nltk``).
+        package_name: Human-readable label for the imported package.  Defaults
+            to the run directory stem (e.g. ``"20260412_104618_nltk"``).
+
+    Returns:
+        API-style summary payload with keys ``message``, ``package_id``,
+        ``package_name``, and ``tables`` (list of created table summaries).
+
+    Raises:
+        FileNotFoundError: If ``run_dir`` or its ``ipc/`` subdirectory does not
+            exist, or if no ``*.v1.json`` IPC files are found.
+        ValueError: If an IPC file is malformed, missing required fields, no
+            name entries are found, or this run directory has already been
+            imported.
+    """
+    run_dir_resolved = run_dir.resolve()
+    if not run_dir_resolved.is_dir():
+        raise FileNotFoundError(f"Run directory does not exist: {run_dir_resolved}")
+
+    ipc_dir = run_dir_resolved / "ipc"
+    if not ipc_dir.is_dir():
+        raise FileNotFoundError(f"IPC directory not found: {ipc_dir}")
+
+    # Only selection files carry payload.params.name_class and
+    # payload.selected_names.  Other IPC artifacts (candidates, walks, package,
+    # walker_run_state, etc.) use different schemas and must be skipped.
+    ipc_files = sorted(ipc_dir.glob("*_selections.v1.json"))
+    if not ipc_files:
+        raise FileNotFoundError(
+            f"No *_selections.v1.json IPC files found in: {ipc_dir}"
+        )
+
+    resolved_package_name = (package_name or "").strip() or run_dir_resolved.name
+
+    # Group names by name_class across all IPC files.  Multiple IPC files may
+    # share the same name_class; their names are merged into a single table so
+    # the generation mapper sees exactly one source_txt_name per class.
+    names_by_class: dict[str, list[str]] = {}
+    for ipc_path in ipc_files:
+        with open(ipc_path, encoding="utf-8") as handle:
+            ipc_data = json.load(handle)
+
+        if not isinstance(ipc_data, dict):
+            raise ValueError(f"IPC file root must be an object: {ipc_path.name}")
+
+        payload = ipc_data.get("payload")
+        if not isinstance(payload, dict):
+            raise ValueError(f"IPC file missing 'payload' object: {ipc_path.name}")
+
+        params = payload.get("params")
+        if not isinstance(params, dict):
+            raise ValueError(f"IPC file missing 'payload.params' object: {ipc_path.name}")
+
+        name_class = str(params.get("name_class", "")).strip()
+        if not name_class:
+            raise ValueError(
+                f"IPC file missing 'payload.params.name_class': {ipc_path.name}"
+            )
+
+        selected_names = payload.get("selected_names")
+        if not isinstance(selected_names, list):
+            raise ValueError(
+                f"IPC file missing 'payload.selected_names' list: {ipc_path.name}"
+            )
+
+        for entry in selected_names:
+            if not isinstance(entry, dict):
+                continue
+            name_value = str(entry.get("name", "")).strip()
+            if not name_value:
+                continue
+            names_by_class.setdefault(name_class, []).append(name_value)
+
+    if not names_by_class:
+        raise ValueError("No name entries found across all IPC files in the run.")
+
+    # Use the resolved run_dir path as the metadata_json_path sentinel and a
+    # fixed literal as package_zip_path.  Together they form a unique key that
+    # prevents re-importing the same run directory.
+    run_dir_str = str(run_dir_resolved)
+    ipc_sentinel = "(ipc-run-import)"
+
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO imported_packages (
+                package_name,
+                imported_at,
+                metadata_json_path,
+                package_zip_path
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                resolved_package_name,
+                datetime.now(timezone.utc).isoformat(),
+                run_dir_str,
+                ipc_sentinel,
+            ),
+        )
+        if cursor.lastrowid is None:
+            raise RuntimeError(
+                "SQLite did not return a row id for imported package insert."
+            )
+        package_id = int(cursor.lastrowid)
+
+        created_tables: list[dict[str, Any]] = []
+        # Sort by name_class for deterministic table index assignment.
+        for index, (name_class, names) in enumerate(
+            sorted(names_by_class.items()), start=1
+        ):
+            # source_txt_name uses the nltk_{name_class}.txt convention:
+            #   _map_source_txt_name_to_generation_class  → class_key = name_class
+            #   _extract_syllable_option_from_source_txt_name → None → treated as "all"
+            source_txt_name = f"nltk_{name_class}.txt"
+
+            table_name = build_package_table_name(
+                resolved_package_name, f"nltk_{name_class}", package_id, index
+            )
+            create_text_table(conn, table_name)
+
+            rows = [(i + 1, name) for i, name in enumerate(names)]
+            insert_text_rows(conn, table_name, rows)
+
+            conn.execute(
+                """
+                INSERT INTO package_tables (
+                    package_id, source_txt_name, table_name, row_count
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (package_id, source_txt_name, table_name, len(rows)),
+            )
+            created_tables.append(
+                {
+                    "source_txt_name": source_txt_name,
+                    "table_name": table_name,
+                    "row_count": len(rows),
+                }
+            )
+
+        conn.commit()
+        return {
+            "message": (
+                f"Imported run '{resolved_package_name}' with "
+                f"{len(created_tables)} class table(s)."
+            ),
+            "package_id": package_id,
+            "package_name": resolved_package_name,
+            "tables": created_tables,
+        }
+
+    except sqlite3.IntegrityError as exc:
+        conn.rollback()
+        raise ValueError(
+            f"Run directory '{run_dir_str}' has already been imported."
+        ) from exc
+    except Exception:
+        conn.rollback()
+        raise
+
+
+__all__ = ["load_metadata_json", "read_txt_rows", "import_package_pair", "import_from_run_directory"]
