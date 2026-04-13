@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.3](https://github.com/pipe-works/pipeworks-namegen-api/compare/pipeworks-namegen-api-v0.1.2...pipeworks-namegen-api-v0.1.3) (2026-04-13)
+
+
+### Features
+
+* **api:** add POST /api/import-from-run for direct IPC run directory import ([#14](https://github.com/pipe-works/pipeworks-namegen-api/issues/14)) ([1ad60ee](https://github.com/pipe-works/pipeworks-namegen-api/commit/1ad60eeb25c6a549d97ddde2bb3242363edc8dac))
+
+
+### Bug Fixes
+
+* **api:** use ci-safe core dependency source ([#10](https://github.com/pipe-works/pipeworks-namegen-api/issues/10)) ([b598ba8](https://github.com/pipe-works/pipeworks-namegen-api/commit/b598ba877519174c3b8036d285cab4f6e7251f22))
+
+
+### Documentation
+
+* **deploy:** add luminal.local nginx template with CORS for explore page ([#15](https://github.com/pipe-works/pipeworks-namegen-api/issues/15)) ([b6c92bf](https://github.com/pipe-works/pipeworks-namegen-api/commit/b6c92bf5dd8b599f8543e475b7fe9a1a7bc9dafc))
+* **readthedocs:** add root config ([b1d9800](https://github.com/pipe-works/pipeworks-namegen-api/commit/b1d9800f656fbb91b1e1120e8728f56e9214c8e3))
+
 ## [0.1.2](https://github.com/pipe-works/pipeworks-namegen-api/compare/pipeworks-namegen-api-v0.1.1...pipeworks-namegen-api-v0.1.2) (2026-03-21)
 
 
