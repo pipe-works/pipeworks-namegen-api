@@ -1,0 +1,40 @@
+server {
+    listen 80;
+    server_name namegen-api.luminal.local;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name namegen-api.luminal.local;
+
+    ssl_certificate     /etc/nginx/certs/namegen-api.luminal.local.pem;
+    ssl_certificate_key /etc/nginx/certs/namegen-api.luminal.local-key.pem;
+
+    access_log /var/log/nginx/namegen-api.luminal.local.access.log;
+    error_log  /var/log/nginx/namegen-api.luminal.local.error.log;
+
+    include /etc/nginx/snippets/security-headers.conf;
+    include /etc/nginx/snippets/proxy-common.conf;
+    include /etc/nginx/snippets/proxy-timeouts.conf;
+
+    location = /health {
+        proxy_pass http://127.0.0.1:8360;
+    }
+
+    location /api/ {
+        # Handle CORS preflight from permitted browser clients.
+        if ($request_method = OPTIONS) {
+            add_header Access-Control-Allow-Origin  "https://pipeworks-org.luminal.local" always;
+            add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+            add_header Access-Control-Allow-Headers "Content-Type" always;
+            add_header Access-Control-Max-Age       3600 always;
+            add_header Content-Length 0;
+            add_header Content-Type text/plain;
+            return 204;
+        }
+
+        add_header Access-Control-Allow-Origin "https://pipeworks-org.luminal.local" always;
+        proxy_pass http://127.0.0.1:8360;
+    }
+}
